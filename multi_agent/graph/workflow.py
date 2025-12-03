@@ -4,6 +4,7 @@ from typing import Annotated, List, TypedDict, Union
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
+from multi_agent.graph.agents import router_node, chat_agent_node, task_agent_node
 
 from core.llm import get_llm
 from tools.base import get_tools
@@ -12,35 +13,22 @@ from tools.base import get_tools
 # 状态是图在节点之间传递的数据包。这里我们主要传递消息历史。
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], operator.add]
+    next:str
 
-# 2. 定义节点 (Nodes)
-# 节点是执行具体逻辑的地方。
+# 2. 定义边 (Edges)
+def router_condition(state: AgentState):
+    """
+    条件边逻辑：根据意图进行下一步
+    """
+    return state["next"]
 
-def call_model(state: AgentState):
+def task_condition(state: AgentState):
     """
-    核心思考节点：调用大模型，决定下一步是回复用户还是调用工具。
+    条件边逻辑：任务智能体决定是否继续调用工具
     """
-    messages = state['messages']
-    llm = get_llm()
-    tools = get_tools()
-    
-    # 将工具绑定到模型上，让模型知道有哪些工具可用
-    model_with_tools = llm.bind_tools(tools)
-    
-    response = model_with_tools.invoke(messages)
-    return {"messages": [response]}
-
-def should_continue(state: AgentState):
-    """
-    条件边逻辑：判断是否需要继续调用工具。
-    """
-    messages = state['messages']
-    last_message = messages[-1]
-    
-    # 如果模型返回的消息包含 tool_calls，说明它想调用工具 -> 转到 'tools' 节点
-    if last_message.tool_calls:
+    last_message = state["messages"][-1] 
+    if last_message.tool_calls: 
         return "tools"
-    # 否则说明它已经生成了最终回复 -> 结束
     return END
 
 # 3. 构建图 (Graph Construction)
@@ -49,28 +37,38 @@ def create_graph():
     workflow = StateGraph(AgentState)
     
     # 添加节点
-    workflow.add_node("agent", call_model)
-    
+    workflow.add_node("router", router_node)
+    workflow.add_node("chat_agent", chat_agent_node)
+    workflow.add_node("task_agent", task_agent_node)
     # 添加工具执行节点 (LangGraph 预置了 ToolNode，非常方便)
-    tool_node = ToolNode(get_tools())
-    workflow.add_node("tools", tool_node)
+    workflow.add_node("tools", ToolNode(get_tools()))
     
     # 设置入口点
-    workflow.set_entry_point("agent")
+    workflow.set_entry_point("router")
     
     # 添加边 (Edges)
     # 逻辑：agent -> 判断(should_continue) -> tools 或 END
     workflow.add_conditional_edges(
-        "agent",
-        should_continue,
+        "router",
+        router_condition,
+        {
+            "chat_agent": "chat_agent",
+            "task_agent": "task_agent"
+        }
+    )
+    # 逻辑：闲聊结束后回到路由节点还是应该结束(END)?
+    workflow.add_edge("chat_agent", END)
+
+    workflow.add_conditional_edges(
+        "task_agent",
+        task_condition,
         {
             "tools": "tools",
             END: END
         }
-    )
-    
-    # 逻辑：工具执行完后，必须把结果扔回给 agent 让它继续思考
-    workflow.add_edge("tools", "agent")
+    ) 
+
+    workflow.add_edge("tools", "task_agent")
     
     # 编译图
     app = workflow.compile()
@@ -80,13 +78,24 @@ def create_graph():
 if __name__ == "__main__":
     app = create_graph()
     
+    print("--- 开始执行工作流1 ---")
     # 模拟用户输入
-    inputs = {"messages": [HumanMessage(content="北京今天天气怎么样？")]}
-    
-    print("--- 开始执行工作流 ---")
-    for output in app.stream(inputs):
+    inputs1 = {"messages": [HumanMessage(content="北京今天天气怎么样？")]}
+    for output in app.stream(inputs1):
         # 打印每一步的输出，方便调试
         for key, value in output.items():
             print(f"Node '{key}':")
-            print(value) # 如果想看详细日志可以取消注释
+            if "messages" in value:
+                print(f'回复：{value["messages"]}') # 如果想看详细日志可以取消注释
+    print("--- 执行结束 ---")
+
+    print("--- 开始执行工作流2 ---")
+    # 模拟用户输入
+    inputs2 = {"messages": [HumanMessage(content="你好？")]}
+    for output in app.stream(inputs2):
+        # 打印每一步的输出，方便调试
+        for key, value in output.items():
+            print(f"Node '{key}':")
+            if "messages" in value:
+                print(f'回复：{value["messages"]}') # 如果想看详细日志可以取消注释
     print("--- 执行结束 ---")
