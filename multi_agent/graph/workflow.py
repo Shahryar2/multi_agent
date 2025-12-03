@@ -80,7 +80,7 @@ if __name__ == "__main__":
     
     print("--- 开始执行工作流1 ---")
     # 模拟用户输入
-    inputs1 = {"messages": [HumanMessage(content="北京今天天气怎么样？")]}
+    inputs1 = {"messages": [HumanMessage(content="最近北京天气？")]}
     for output in app.stream(inputs1):
         # 打印每一步的输出，方便调试
         for key, value in output.items():
@@ -91,7 +91,7 @@ if __name__ == "__main__":
 
     print("--- 开始执行工作流2 ---")
     # 模拟用户输入
-    inputs2 = {"messages": [HumanMessage(content="你好？")]}
+    inputs2 = {"messages": [HumanMessage(content="下午好小屈，如果我想写一篇论文，应该怎么做呢？")]}
     for output in app.stream(inputs2):
         # 打印每一步的输出，方便调试
         for key, value in output.items():
