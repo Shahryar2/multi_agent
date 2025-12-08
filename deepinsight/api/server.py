@@ -2,6 +2,8 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
+from fastapi.staticfiles import StaticFiles
+from fastapi.openapi.docs import get_swagger_ui_html
 from graph.workflow import create_graph
 import json
 import asyncio
@@ -49,6 +51,20 @@ async def generate_stream(query: str):
 
     yield "data: [DONE]\n\n"
 
+app.mount("/static", StaticFiles(directory="api/static"), name="static")
+
+@app.get("/docs", include_in_schema=False)
+async def custom_swagger_ui():
+    """静态方式加载UI"""
+    return get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title=f"{app.title} - Swagger UI",
+        swagger_css_url="/static/swagger-ui/swagger-ui.css",
+        swagger_js_url="/static/swagger-ui/swagger-ui-bundle.js",
+        swagger_ui_standalone_preset_js_url="/static/swagger-ui/swagger-ui-standalone-preset.js",
+        swagger_ui_init_oauth=None
+    )
+
 @app.post("/chat/stream")
 async def chat_stream(query: str):
     """
@@ -66,4 +82,4 @@ def health_check():
 
 if __name__ == "__main__":
     # 启动服务
-    uvicorn.run("api.server:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("api.server:app", host="localhost", port=8000, reload=True)
