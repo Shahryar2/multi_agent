@@ -3,9 +3,34 @@ from langchain_core.output_parsers import JsonOutputParser,StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_tavily import TavilySearch
 from core.llm import get_llm
+import logging
 from tools.base import get_tools
 from graph.state import ResearchState
-from deepinsight.prompts.prompt_demo import PLANNER_PROMPT,WRITER_PROMPT
+from deepinsight.prompts.prompt_demo import CHAT_PROMPT, PLANNER_PROMPT, ROUTER_PROMPT,WRITER_PROMPT
+
+logger = logging.getLogger(__name__)
+
+def router_node(state: ResearchState):
+    """
+    路由节点
+    """
+    task = state["task"]
+    llm = get_llm()
+    
+    system_prompt = ROUTER_PROMPT
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("user", "{task}")
+    ])
+    chain = prompt | llm | StrOutputParser()
+    category = chain.invoke({"task": task})
+    if "report" in category:
+        return {"next": "planner"}
+    if "search" in category:
+        return {"next": "simple_researcher"}
+    if "chat" in category:
+        return {"next": "chat"}
 
 def planner_node(state: ResearchState):
     """
@@ -84,3 +109,32 @@ def writer_node(state: ResearchState):
     })
     
     return {"draft": draft}
+
+def simple_researcher_node(state: ResearchState):
+    """
+    简单搜索节点
+    """
+    task = state["task"]
+    
+    tavily_tool = TavilySearch(max_results=1)
+
+    logger.info(f"调用简单搜索工具，查询：{task}")
+    print(f"搜索结果:{tavily_tool.invoke({'query': task})}")
+
+def chat_node(state: ResearchState):
+    """
+    聊天节点
+    """
+    task = state["task"]
+    llm = get_llm()
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", CHAT_PROMPT),
+        ("user", "{task}")
+    ])
+    
+    chain = prompt | llm | StrOutputParser()
+    response = chain.invoke({"task": task})
+    
+    logger.info(f"聊天响应：{response}")
+    print(f"聊天响应：{response}")

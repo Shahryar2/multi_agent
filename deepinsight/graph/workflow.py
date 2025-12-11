@@ -1,60 +1,62 @@
 import operator
 from typing import Annotated, List, TypedDict, Union
-
+from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
-from deepinsight.graph.agents import planner_node, research_node, writer_node
+from deepinsight.graph.agents import chat_node, router_node,planner_node, research_node, simple_researcher_node, writer_node
 from graph.state import ResearchState
 
 from core.llm import get_llm
 from tools.base import get_tools
 
-# # 2. 定义边 (Edges)
-# def router_condition(state: AgentState):
-#     """
-#     条件边逻辑：根据意图进行下一步
-#     """
-#     return state["next"]
-
-# def task_condition(state: AgentState):
-#     """
-#     条件边逻辑：任务智能体决定是否继续调用工具
-#     """
-#     last_message = state["messages"][-1] 
-#     if last_message.tool_calls: 
-#         return "tools"
-#     return END
-
-# 3. 构建图 (Graph Construction)
+# 构建图 (Graph Construction)
 def create_graph():
     # 初始化图
     workflow = StateGraph(ResearchState)
     
     # 添加节点
+    workflow.add_node("router", router_node)
     workflow.add_node("planner", planner_node)
     workflow.add_node("researcher", research_node)
     workflow.add_node("writer", writer_node)
-
-    # # 添加工具执行节点 (LangGraph 预置了 ToolNode，非常方便)
-    # workflow.add_node("tools", ToolNode(get_tools()))
-    
+    # workflow.add_node("simple_researcher", simple_researcher_node)
+    workflow.add_node("chat", chat_node)
+   
     # 设置入口点
-    workflow.set_entry_point("planner")
-    
+    workflow.set_entry_point("router")
+
+    workflow.add_conditional_edges(
+        "router",
+        lambda state: state["next"],
+        {
+            "planner": "planner",
+            # "simple_researcher": "simple_researcher",
+            "chat": "chat",
+        }
+    )
+    # 研究流程
     workflow.add_edge("planner", "researcher")
     workflow.add_edge("researcher", "writer")
     workflow.add_edge("writer", END)
-    
+
+    # 简单搜索
+    # workflow.add_edge("simple_researcher", END)
+
+    # 聊天
+    workflow.add_edge("chat", END)
+
+    # 添加人机协同记忆 
+    memory = MemorySaver()
     # 编译图
-    app = workflow.compile()
+    app = workflow.compile(checkpointer=memory,interrupt_before=["researcher"])
     return app
 
 # 测试代码
 if __name__ == "__main__":
     app = create_graph()
     
-    task = "分析2024年中国新能源汽车出海现状"
+    task = "分析2025年中国新能源汽车出海现状"
     print(f"开始任务：{task}")
 
     inputs = {
