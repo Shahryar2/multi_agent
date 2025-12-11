@@ -11,3 +11,4 @@ class ResearchState(TypedDict):
     draft: str
     revision_number: int
     max_revisions: int
+    next: str
