@@ -6,6 +6,7 @@
 #### 一、接下来要实现的功能（优先级）
 - 1) 内容溯源（Citations）与文档结构化（必须）-ing
   - 1) 短期为解决token限制问题先快速截断；
+       关于截断的处理由两部分1.针对文档 2.针对对话
   - 2) 中期采用Map-Reduce摘要
   - 3) 后期补充实现向量库+检索增强
 - 2) Reviewer（审稿/自检）节点：实现打回-重搜循环（高优先）
@@ -20,23 +21,6 @@
 ---
 
 #### 二、每一项的为什么/怎么做/验证（详细）
-
-1) 内容溯源（Citations）与文档结构化（必须）
-- 为什么：研报必须能为每个断言提供来源，面试问答时这是核心亮点。
-- 怎么做（关键点）：
-  - 修改 `research_node` 返回的 `documents` 不再是纯文本，而是结构化字典：`{"query": q, "url": url, "title": title, "content": snippet}` 或 `{"source_id": id, "url":..., "text":...}`。
-  - 在 `writer_node` 的 prompt 中强制要求“每段结论要标注脚注 [1] 并在末尾列出对应 URL”。
-- 代码片段（示例修改 research_node 返回）：
-  ```python
-  # documents.append(doc) -> 改为:
-  doc_item = {"query": query, "url": result.get("url"), "title": result.get("title"), "text": result.get("content")}
-  documents.append(doc_item)
-  ```
-  - 在写作时把 `documents` 序列化为带编号的引用列表并在 prompt 中附上（或把 `[{index, text, url}, ...]` 直接喂模型）。
-- 验证：
-  - `writer_node` 输出中出现 `[1]`、`[2]` 等脚注，并且底部引用包含对应 URL。
-  - 手动检查若干段落来源是否与引用一致。
-
 2) Reviewer（审稿人）节点：实现打回-重搜循环（高优先）
 - 为什么：保证质量并避免 hallucination；实现闭环、展示架构能力。
 - 怎么做：

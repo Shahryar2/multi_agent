@@ -26,4 +26,4 @@ WRITER_PROMPT = """你是一个专业的行业分析师。
 CHAT_PROMPT= """你是一个友好的助手，帮助用户解决问题。"""
 
 
-REVIEVER_PROMPT = """你是审稿人，检查下述文章是否覆盖给定的所有研究子问题。返回 JSON：{{status: 'pass'|'fail', missing: []}}。"""
+REVIEVER_PROMPT = """你是审稿人，检查下述文章是否覆盖给定的所有研究子问题。返回 JSON：{{"status": "pass"|"fail", "missing": []}}。"""

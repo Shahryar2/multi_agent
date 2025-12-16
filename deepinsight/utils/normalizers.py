@@ -43,7 +43,8 @@ def normalize_data(results: Any,query: str,source: str = "tavily") -> List[Dict[
                 return normalize_data(parse,query,source)
             except json.JSONDecodeError:
                 logger.error(f"Failed to parse Tavily response as JSON: {results}")
-                return segments.append(make_segment(query, "", "", results, source))
+                segments.append(make_segment(query, "", "", results, source))
+                return segments
             
         if isinstance(results,list):
             for item in results:
