@@ -1,14 +1,19 @@
-import operator
+import sqlite3
 from typing import Annotated, List, TypedDict, Union
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
+# from langgraph.checkpoint. import SqliteSaver
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
-from deepinsight.graph.agents import chat_node, router_node,planner_node, research_node, simple_researcher_node, writer_node
+from deepinsight.graph.agents import (
+    chat_node, 
+    reviewer_node, 
+    router_node,
+    planner_node, 
+    research_node,  
+    writer_node,
+)
 from graph.state import ResearchState
-
-from core.llm import get_llm
-from tools.base import get_tools
 
 # 构建图 (Graph Construction)
 def create_graph():
@@ -20,7 +25,7 @@ def create_graph():
     workflow.add_node("planner", planner_node)
     workflow.add_node("researcher", research_node)
     workflow.add_node("writer", writer_node)
-    # workflow.add_node("simple_researcher", simple_researcher_node)
+    workflow.add_node("reviewer", reviewer_node)
     workflow.add_node("chat", chat_node)
    
     # 设置入口点
@@ -38,21 +43,29 @@ def create_graph():
     # 研究流程
     workflow.add_edge("planner", "researcher")
     workflow.add_edge("researcher", "writer")
-    workflow.add_edge("writer", END)
+    workflow.add_edge("writer", "reviewer")
 
-    # 简单搜索
-    # workflow.add_edge("simple_researcher", END)
+    workflow.add_conditional_edges(
+        "reviewer",
+        lambda state: state.get("review",{}).get("status"),
+        {
+            "pass": END,
+            "fail": "planner",
+        }
+    )
 
     # 聊天
     workflow.add_edge("chat", END)
 
-    # 添加人机协同记忆 
-    memory = MemorySaver()
+    # --- 持久化配置 (SqliteSaver) ---
+    conn = sqlite3.connect("checkpoints.sqlite", check_same_thread=False)
+    memory = SqliteSaver(conn)
+
     # 编译图
-    app = workflow.compile(checkpointer=memory,interrupt_before=["researcher"])
+    app = workflow.compile(checkpointer=memory, interrupt_before=["researcher"])
     return app
 
-# 测试代码
+"""测试代码"""
 if __name__ == "__main__":
     app = create_graph()
     
