@@ -7,8 +7,9 @@ class ResearchState(TypedDict):
     """
     task: str
     plan: List[str]
-    documents: Annotated[List[str], operator.add]
+    documents: Annotated[List[Dict[str, Any]], operator.add]
     draft: str
     revision_number: int
     max_revisions: int
     next: str
+    bg_investigation: List[Dict[str, Any]]
