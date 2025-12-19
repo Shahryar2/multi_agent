@@ -4,28 +4,34 @@ import logging
 from core.llm import get_llm
 import json
 from typing import Any, Dict, List, TypedDict
+from deepinsight.core.llm import model_tag
 
 logger = logging.getLogger(__name__)
 
-def get_encoding(model_name: str | None = None):
+def get_encoding(model_tag: str | None = None):
     """
     获取模型对应的编码器
     """
-    if model_name is None:
+    if model_tag == "smart":
+        model_name = os.getenv("Gemini_model", "gpt-3.5-turbo")
+    elif model_tag == "basic":
         model_name = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
+    else:
+        model_name = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
+
     try:
         return tiktoken.encoding_for_model(model_name) if model_name else tiktoken.get_encoding("cl100k_base")
     except KeyError:
         logger.warning(f"模型 {model_name} 未知，使用默认编码器 cl100k_base")
         return tiktoken.get_encoding("cl100k_base")
     
-def count_tokens(text: str, model_name: str | None = None) -> int:
+def count_tokens(text: str, model_tag: str | None = None) -> int:
     """
     计算文本的 token 数量
     """
     if not text:
         return 0
-    enc = get_encoding(model_name)
+    enc = get_encoding(model_tag)
     return len(enc.encode(text))
 
 def ensure_content_string(content: Any) -> str:
@@ -44,12 +50,12 @@ def term_document(
     documents: List[Dict[str, Any]],
     max_tokens: int = 20000,
     max_tokens_per_doc: int = 1000,
-    model_name: str | None = None
+    model_tag: str | None = None
 ) -> List[Dict[str, Any]]:
     """
     截断文档
     """
-    enc = get_encoding(model_name)
+    enc = get_encoding(model_tag)
     trimmed_docs: List[Dict[str, Any]] = []
     current_tokens = 0
 
