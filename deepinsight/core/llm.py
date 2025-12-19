@@ -12,9 +12,9 @@ def get_llm(temperature: float = 0.7):
     获取大模型实例的工厂函数。
     使用 lru_cache 确保在相同参数下只创建一个实例（单例优化）。
     """
-    api_key = os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("OPENAI_API_BASE")
-    model_name = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
+    api_key = os.getenv("fangzhou_api_key")
+    base_url = os.getenv("fangzhou_api_base")
+    model_name = os.getenv("Gemini_model", "gpt-3.5-turbo")
 
     if not api_key:
         raise ValueError("OPENAI_API_KEY not found in environment variables.")
