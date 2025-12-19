@@ -1,10 +1,12 @@
 import json
+import re
 from langchain_core.messages import SystemMessage
 from langchain_core.output_parsers import JsonOutputParser,StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_tavily import TavilySearch
 from core.llm import get_llm
 import logging
+from deepinsight.utils.summarizer import map_summarize_documents
 from deepinsight.utils.token_utils import term_document
 from tools.base import get_tools
 from graph.state import ResearchState
@@ -96,8 +98,11 @@ def writer_node(state: ResearchState):
     documents = state.get("documents", []) or []
     llm = get_llm()
 
+    # Map_reduce 文档摘要
+    summarized_docs = map_summarize_documents(documents, max_workers=5)
+
     processed_docs = term_document(
-        documents,
+        summarized_docs,
         max_tokens=25000, 
         max_tokens_per_doc=1500,
     )
@@ -111,28 +116,22 @@ def writer_node(state: ResearchState):
             "url": seg.get("url"),
             "snippet": seg.get("text")[:300]
         })
-    # 调试信息
-    logger.info("processed_docs count=%d", len(processed_docs))
-    logger.debug("processed_docs sample: %s", processed_docs[:3])
-    logger.info("citations: %s", citations)
-    for c in citations:
-        if not c.get("url"):
-            c['url'] = "来源缺失"
-
-    citations_str = "\n".join(
-        f"[{c['index']}] {c['title']} — ({c['url']})" for c in citations
-    )
+    
+    # for c in citations:
+    #     if not c.get("url"):
+    #         c['url'] = "来源缺失"
 
     # 定义写作的 Prompt
     system_prompt = WRITER_PROMPT.format(task=task)
     docs_context = "\n\n".join([f"[{i+1}] {seg.get('text')}" for i, seg in enumerate(processed_docs)])
 
     user_instructions = (
-        "严格要求：本文中每个基于资料的断言请用脚注编号（例如：这是结论。[1]）。"
-        " **最后必须包含“引用列表”标题，按编号逐行列出完整 URL，格式如下：**\n"
-        "[1] https://example.com/article1\n[2] https://example.com/article2\n\n"
-        "参考资料列表：\n" + citations_str + "\n\n"
-        "资料内容（片段）请参见：\n" + docs_context
+        f"任务：请基于以下资料撰写关于“{task}”的深度报告。\n\n"
+        "要求：\n"
+        "1. **必须**在文中每个事实陈述后加上引用编号，例如：“市场增长率达到15% [1]。”\n"
+        "2. **绝对不要**在文末自己生成“引用列表”或“参考文献”章节，系统会自动处理。\n"
+        "3. 保持客观、专业，使用 Markdown 格式。\n\n"
+        f"参考资料：\n{docs_context}"
     )
     
     prompt = ChatPromptTemplate.from_messages([
@@ -145,8 +144,12 @@ def writer_node(state: ResearchState):
         "instructions": user_instructions,
         "task": task
     })
+    citations_footer = "\n\n## 引用列表\n" + "\n".join(
+        f"[{c['index']}] {c['title']} — {c['url']}" for c in citations
+    )
+    final_draft = draft + citations_footer
     
-    return {"draft": draft,"citations": citations}
+    return {"draft": final_draft,"citations": citations}
 
 def simple_researcher_node(state: ResearchState):
     """
@@ -189,14 +192,17 @@ def reviewer_node(state: ResearchState):
         ("system", REVIEVER_PROMPT),
         ("user", "Plan:{plan}\n\nDraft:{draft}\n\n请输出 JSON.")
     ])
-    chain = prompt | llm | JsonOutputParser()
+    chain = prompt | llm | StrOutputParser()
     try:
-        res = chain.invoke({"plan": plan, "draft": draft})
-        if isinstance(res,dict) and res.get("status") == "pass":
-            logger.info("review passed.")
+        raw_res = chain.invoke({"plan": plan, "draft": draft})
+        json_match = re.search(r'\{.*\}', raw_res, re.DOTALL)
+        if json_match:
+            res = json.loads(json_match.group())
+        else:
+            res = {"status": "fail", "missing": ['无法解析模型输出']}
+        if res.get("status") == "pass":
             return {"review": {"status": "pass"}}
         else:
-            logger.info("review failed.")
             return {"review": {"status": "fail", "missing": res.get("missing", [])}}
     except Exception as e:
         logger.error(f"Reviewer parsing failed: {e}")

@@ -46,4 +46,5 @@ def run_demo():
             print(v)
 
 if __name__ == "__main__":
+    '''人机交互功能测试'''
     run_demo()

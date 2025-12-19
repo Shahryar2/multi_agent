@@ -15,6 +15,7 @@ dependencies = [
     "langgraph>=1.0.4",
     "langgraph-checkpoint>=3.0.1",
     "langgraph-checkpoint-sqlite>=3.0.1",
+    "pandas>=2.3.3",
     "pydantic>=2.12.5",
     "python-dotenv>=1.2.1",
     "tavily-python>=0.7.14",
