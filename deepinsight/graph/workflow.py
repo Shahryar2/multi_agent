@@ -6,7 +6,8 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from deepinsight.graph.agents import (
-    chat_node, 
+    chat_node,
+    orchestrator_node, 
     reviewer_node, 
     router_node,
     planner_node, 
@@ -23,6 +24,7 @@ def create_graph():
     # 添加节点
     workflow.add_node("router", router_node)
     workflow.add_node("planner", planner_node)
+    workflow.add_node("orchestrator", orchestrator_node)
     workflow.add_node("researcher", research_node)
     workflow.add_node("writer", writer_node)
     workflow.add_node("reviewer", reviewer_node)
@@ -41,8 +43,18 @@ def create_graph():
         }
     )
     # 研究流程
-    workflow.add_edge("planner", "researcher")
-    workflow.add_edge("researcher", "writer")
+    workflow.add_edge("planner", "orchestrator")
+    
+    workflow.add_conditional_edges(
+        "orchestrator",
+        lambda state: state["next"],
+        {
+            "researcher": "researcher",
+            "writer": "writer",
+        }
+    )
+    
+    workflow.add_edge("researcher", "orchestrator")
     workflow.add_edge("writer", "reviewer")
 
     workflow.add_conditional_edges(
@@ -62,24 +74,5 @@ def create_graph():
     memory = SqliteSaver(conn)
 
     # 编译图
-    app = workflow.compile(checkpointer=memory, interrupt_before=["researcher"])
+    app = workflow.compile(checkpointer=memory, interrupt_before=["planner"])
     return app
-
-"""测试代码"""
-if __name__ == "__main__":
-    app = create_graph()
-    
-    task = "分析2025年中国新能源汽车出海现状"
-    print(f"开始任务：{task}")
-
-    inputs = {
-        "task":task,
-        "max_revisions":1,
-        "revision_number":0,
-    }
-    for output in app.stream(inputs):
-        for key, value in output.items():
-            print(f"\n==={key}完成===")
-            if key == "writer":
-                print(f"\n最终报告内容：\n{value}\n")
-                print(value["draft"])

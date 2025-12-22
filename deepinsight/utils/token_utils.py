@@ -4,7 +4,6 @@ import logging
 from core.llm import get_llm
 import json
 from typing import Any, Dict, List, TypedDict
-from deepinsight.core.llm import model_tag
 
 logger = logging.getLogger(__name__)
 
