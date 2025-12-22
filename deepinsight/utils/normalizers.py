@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Any, Dict, List, TypedDict
 import logging
 import uuid
@@ -7,21 +8,45 @@ logger = logging.getLogger(__name__)
 
 def make_segment(query: str, url: str, title: str, text: str, source: str, extra: Dict[str, Any] = None) -> Dict[str, Any]:
     """生成标准化的 segment dict"""
+    clean_texted = clean_text(text)
     return {
         "id": str(uuid.uuid4())[:8],
         "source": source,
         "query": query,
         "url": url or "",
         "title": title or "",
-        "text": text or "",
+        "text": clean_texted,
         "metadata": extra or {}
     }
+
+def clean_text(text: str) -> str:
+    """
+    深度清洗:
+    1. 去除多余空白和换行
+    2. 统一编码
+    """
+    if not text:
+        return ""
+    # 1. 去除 HTML 标签
+    text = re.sub(r'<[^>]+>', '', text)
+    # 2. 去除 Markdown 图片/链接语法但保留文字 [text](url) -> text
+    text = re.sub(r'!\[.*?\]\(.*?\)', '', text)
+    text = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', text)
+    # 3. 去除长串 URL
+    text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
+    # 4. 合并多余空白和换行
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
 
 def deupdate_segment(segment: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     # 去重
     seen = set()
     out = []
     for seg in segment:
+        if len(seg.get("text","")) < 10:
+            continue
+
         key = seg.get("url") or seg.get("title") or seg.get("text")[:200]
         if key and key not in seen:
             seen.add(key)
