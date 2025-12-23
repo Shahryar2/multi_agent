@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
 from langchain_core.prompts import ChatPromptTemplate
@@ -8,11 +9,11 @@ from deepinsight.prompts.prompt_demo import SUMMARIZE_PROMPT
 
 logger = logging.getLogger(__name__)
 
-def summarize_single_doc(doc:Dict[str,Any]) -> Dict[str,Any]:
+def summarize_single_doc(doc:Dict[str,Any], model_tag: str = "basic") -> Dict[str,Any]:
     """
     对单个文档进行摘要
     """
-    llm = get_llm()
+    llm = get_llm(model_tag=model_tag)
     query = doc.get("query","通用研究")
     text = doc.get("text","")
 
@@ -26,6 +27,7 @@ def summarize_single_doc(doc:Dict[str,Any]) -> Dict[str,Any]:
     chain = prompt | llm | StrOutputParser()
     
     try:
+        time.sleep(0.5)  # 避免请求过快
         print(f"[摘要中]正在处理文档:{doc.get('title','无标题')[:20]}...")
         summary = chain.invoke({'query': query, 'text': text})
         new_doc = doc.copy()
@@ -39,18 +41,19 @@ def summarize_single_doc(doc:Dict[str,Any]) -> Dict[str,Any]:
     
 def map_summarize_documents(
     documents: List[Dict[str,Any]],
-    max_workers: int = 5
+    max_workers: int = 2,
+    model_tag: str = "basic"
 ) -> List[Dict[str,Any]]:
     """
     并行对文档列表进行摘要
     """
     if not documents:
         return []
-    print(f"开始对 {len(documents)} 个文档进行摘要处理。")
-    logger.info(f"开始对 {len(documents)} 个文档进行摘要处理。")
+    print(f"开始对 {len(documents)} 个文档进行摘要处理...")
+    logger.info(f"开始对 {len(documents)} 个文档进行摘要处理...")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        summarized_docs = list(executor.map(summarize_single_doc, documents))
+        summarized_docs = list(executor.map(lambda d: summarize_single_doc(d, model_tag=model_tag), documents))
 
     logger.info("文档摘要处理完成。")
     return summarized_docs

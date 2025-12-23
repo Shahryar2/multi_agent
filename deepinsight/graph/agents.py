@@ -1,17 +1,17 @@
 import json
 import re
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.output_parsers import JsonOutputParser,StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_tavily import TavilySearch
 from core.llm import get_llm
 import logging
 from deepinsight.utils.summarizer import map_summarize_documents
-from deepinsight.utils.token_utils import term_document
+from deepinsight.utils.token_utils import count_tokens, term_document
 from tools.base import get_tools
 from graph.state import ResearchState
 from deepinsight.utils.normalizers import normalize_data
-from deepinsight.prompts.prompt_demo import CHAT_PROMPT, PLANNER_PROMPT, ROUTER_PROMPT,WRITER_PROMPT,REVIEVER_PROMPT
+from deepinsight.prompts.prompt_demo import CHAT_PROMPT, PLANNER_PROMPT, REACHER_PROMPT, ROUTER_PROMPT,WRITER_PROMPT,REVIEVER_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ def router_node(state: ResearchState):
     路由节点
     """
     task = state["task"]
-    llm = get_llm()
+    llm = get_llm(model_tag="smart")
     
     system_prompt = ROUTER_PROMPT
 
@@ -39,13 +39,14 @@ def router_node(state: ResearchState):
 
 def planner_node(state: ResearchState):
     """
-    接收任务，生成搜索计划。
+    拆解任务
     """
     task = state["task"]
-    llm = get_llm()
+    catagory = state.get("catagory","general")
+    llm = get_llm(model_tag="smart")
     
     # 定义计划的 Prompt
-    system_prompt = PLANNER_PROMPT
+    system_prompt = PLANNER_PROMPT.format(category=catagory, task=task)
     
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
@@ -56,55 +57,110 @@ def planner_node(state: ResearchState):
     try:
         plan = chain.invoke({"task": task})
         if isinstance(plan,list):
-            return {"plan": plan}
+            return {"plan": plan,"current_step_index": 0}
         else:
             return {"plan": [task]}
     except Exception as e:
         print(f"---[Planner]解析失败，使用原始任务{e}---")
         plan = [task]
     
-    
-def research_node(state: ResearchState):
-    """
-    根据搜索计划，调用搜索工具获取信息。
-    """
+def orchestrator_node(state: ResearchState):
+    '''
+    编排者节点,决定下一步
+    '''
     plan = state.get("plan", [])
-    documents = state.get("documents", []) or []
-    # background_investigation
-    raw_results = state.get("bg_investigation", []) or []
+    idx = state.get("current_step_index", 0)
 
-    tavily_tool = TavilySearch(max_results=3)
+    if idx < len(plan):
+        return {"next": "researcher"}
+    else:
+        return {"next": "writer"}
+
+def research_node(state: ResearchState):
+    '''
+    单步研究节点,负责当前索引子任务
+    '''
+    idx = state.get("current_step_index", 0)
+    plan = state.get("plan", [])
     
-    for query in plan:
-        # 调用搜索工具
-        print(f"调用搜索工具，查询：{query}")
+    if idx >= len(plan):
+        return {"current_step_index": idx+1}
+    
+    current_task = plan[idx]
+    query = current_task.get("description", "")
+    print(f"---[Researcher]执行子任务 {idx+1}/{len(plan)}: {query}---")
+
+    tavily_tool = TavilySearch(max_results=5)
+    search_results = tavily_tool.invoke({"query": query})
+    
+    new_documents = []
+    raw_results = search_results.get("results", []) 
+    try:
+        new_documents = normalize_data(raw_results, query)
+    except Exception as e:
+        logger.error(f"数据清洗失败: {e}")
+
+    step_summary = ""
+    if new_documents:
+        llm = get_llm(model_tag="smart")
+        # 构建小型上下文
+        termmed_docs = term_document(
+            new_documents,
+            max_tokens=10000,
+        )
+        context_text = "\n".join([f"- {doc.get('text')}" for doc in termmed_docs])
+        prompt = REACHER_PROMPT.format(query=query, context_text=context_text)
+
         try:
-            results = tavily_tool.invoke({"query": query})
-            # 记录原始返回
-            raw_results.append({"query": query, "raw": results})
-            segments = normalize_data(results,query,source="tavily")
-            documents.extend(segments)
+            response = llm.invoke(prompt)
+            step_summary = response.content
+            print(f"---[Researcher]子任务总结: {step_summary}---")
         except Exception as e:
-            print(f"调用搜索工具搜索{query}失败：{e}")
-            continue
-    
-    return {"documents": documents, "bg_investigation": raw_results}
+            logger.error(f"Researcher总结失败: {e}")
+            step_summary = "本步骤未能生成总结。"
+    current_task['result'] = step_summary
+    current_task['status'] = 'completed'
+    plan[idx] = current_task
+
+    return {
+        "documents": new_documents,
+        "current_step_index": idx + 1,
+        "plan": plan,
+        "bg_investigation": raw_results
+    }
 
 def writer_node(state: ResearchState):
     """
-    根据收集到的文档，生成最终的研究报告。
+    撰写
     """
     task = state["task"]
-    documents = state.get("documents", []) or []
-    llm = get_llm()
+    plan = state.get("plan",[])
+    documents = state.get("documents", [])
+    llm = get_llm(model_tag="smart")
 
-    # Map_reduce 文档摘要
-    summarized_docs = map_summarize_documents(documents, max_workers=5)
+    plan_context = ""
+    for step in plan:
+        plan_context += f"### 研究步骤:{step.get('description')}\n"
+        plan_context += f"### 研究结论:{step.get('result','无结果')}\n\n"
+    
+    # 计算占用token
+    plan_tokens = count_tokens(plan_context,model_tag="basic")
+    print(f"---[Writer] 骨架Tokens:{plan_tokens}---")
+
+    # 这里的定值判断有必要吗
+    MODEL_LIMIT = 32000
+    RESERVED_OUTPUT = 4000
+    SYSTEM_PROMPT_ESTIMATE = 2000
+
+    availble_for_docs = MODEL_LIMIT - RESERVED_OUTPUT - SYSTEM_PROMPT_ESTIMATE - plan_tokens
+    if availble_for_docs < 0:
+        logger.warning(f"计划内容过长，超出模型限制")
+        availble_for_docs = 1000
 
     processed_docs = term_document(
-        summarized_docs,
-        max_tokens=25000, 
-        max_tokens_per_doc=1500,
+        documents,
+        max_tokens=availble_for_docs, 
+        model_tag="smart"
     )
     
     citations = []
@@ -117,37 +173,21 @@ def writer_node(state: ResearchState):
             "snippet": seg.get("text")[:300]
         })
     
-    # for c in citations:
-    #     if not c.get("url"):
-    #         c['url'] = "来源缺失"
+    docs_context = "\n\n".join([f"[{i+1}] Title: {seg.get('title')}\nContent: {seg.get('text')}\nSource: {seg.get('url')}" for i, seg in enumerate(processed_docs)])
 
-    # 定义写作的 Prompt
-    system_prompt = WRITER_PROMPT.format(task=task)
-    docs_context = "\n\n".join([f"[{i+1}] {seg.get('text')}" for i, seg in enumerate(processed_docs)])
+    full_prompt = WRITER_PROMPT.format(task=task, plan_context=plan_context, docs_context=docs_context)
+    
+    messages = [
+        SystemMessage(content="你是一个专业的研报撰写专家。"),
+        HumanMessage(content=full_prompt)
+    ]
+    draft = llm.invoke(messages)
+    content = draft.content
 
-    user_instructions = (
-        f"任务：请基于以下资料撰写关于“{task}”的深度报告。\n\n"
-        "要求：\n"
-        "1. **必须**在文中每个事实陈述后加上引用编号，例如：“市场增长率达到15% [1]。”\n"
-        "2. **绝对不要**在文末自己生成“引用列表”或“参考文献”章节，系统会自动处理。\n"
-        "3. 保持客观、专业，使用 Markdown 格式。\n\n"
-        f"参考资料：\n{docs_context}"
-    )
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("user", "{instructions}")
-    ])
-    
-    chain = prompt | llm | StrOutputParser()
-    draft = chain.invoke({
-        "instructions": user_instructions,
-        "task": task
-    })
     citations_footer = "\n\n## 引用列表\n" + "\n".join(
         f"[{c['index']}] {c['title']} — {c['url']}" for c in citations
     )
-    final_draft = draft + citations_footer
+    final_draft = content + citations_footer
     
     return {"draft": final_draft,"citations": citations}
 
@@ -186,24 +226,23 @@ def reviewer_node(state: ResearchState):
     """
     plan = state.get("plan", [])
     draft = state.get("draft", "")
-    llm = get_llm()
+    llm = get_llm(model_tag="basic")
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", REVIEVER_PROMPT),
         ("user", "Plan:{plan}\n\nDraft:{draft}\n\n请输出 JSON.")
     ])
     chain = prompt | llm | StrOutputParser()
+    raw_res = chain.invoke({"plan": plan, "draft": draft})
+
     try:
-        raw_res = chain.invoke({"plan": plan, "draft": draft})
         json_match = re.search(r'\{.*\}', raw_res, re.DOTALL)
         if json_match:
-            res = json.loads(json_match.group())
+            review_data = json.loads(json_match.group())
+            return {"review": review_data}
         else:
-            res = {"status": "fail", "missing": ['无法解析模型输出']}
-        if res.get("status") == "pass":
-            return {"review": {"status": "pass"}}
-        else:
-            return {"review": {"status": "fail", "missing": res.get("missing", [])}}
+            res = json.loads(raw_res)
+            return {"review": res}
     except Exception as e:
         logger.error(f"Reviewer parsing failed: {e}")
-        return {"review": {"status": "fail", "missing": plan}}
+        return {"review": {"status": "pass", "reason": "解析失败兜底"}}

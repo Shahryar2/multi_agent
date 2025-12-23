@@ -36,9 +36,9 @@ def run_demo():
     for k, v in final_events:
         if k == "writer":
             draft = v.get("draft") if isinstance(v, dict) else v
-            print("\n--- Writer Draft (片段) ---")
+            print("\n--- Writer Draft ---")
             if isinstance(draft, str):
-                print(draft[:1000])
+                print(draft)
             else:
                 print(draft)
         if k == "reviewer":
