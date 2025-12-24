@@ -43,26 +43,40 @@ def planner_node(state: ResearchState):
     """
     task = state["task"]
     catagory = state.get("catagory","general")
+    review_feedback = state.get("review",{})
     llm = get_llm(model_tag="smart")
-    
-    # 定义计划的 Prompt
-    system_prompt = PLANNER_PROMPT.format(category=catagory, task=task)
-    
+
+    if not review_feedback or review_feedback.get("status") == "pass":
+        system_prompt = PLANNER_PROMPT.format(category=catagory, task=task)
+        user_input = f"任务：{task}"
+    else:
+        print(f"---[Planner]收到Review反馈，调整计划{review_feedback}---")
+        system_prompt = """
+        
+    """
+        user_input = f"原任务：{task}\n 审核意见：{review_feedback.get('missing','内容缺失')}\n"
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
-        ("user", "{task}")
+        ("user", "{user_input}")
     ])
     
     chain = prompt | llm | JsonOutputParser()
     try:
-        plan = chain.invoke({"task": task})
-        if isinstance(plan,list):
-            return {"plan": plan,"current_step_index": 0}
-        else:
-            return {"plan": [task]}
+        plan = chain.invoke({"user_input": user_input})
+        if not isinstance(plan,list):
+            plan = [plan]
+        return {"plan": plan,"current_step_index": 0}
     except Exception as e:
         print(f"---[Planner]解析失败，使用原始任务{e}---")
-        plan = [task]
+        return {
+            "plan": [{
+                "type": "research", 
+                "description":f"针对{task}进行补充搜索",
+                "status":"pending"
+            }],
+            "current_step_index": 0
+        }
     
 def orchestrator_node(state: ResearchState):
     '''
@@ -148,9 +162,9 @@ def writer_node(state: ResearchState):
     print(f"---[Writer] 骨架Tokens:{plan_tokens}---")
 
     # 这里的定值判断有必要吗
-    MODEL_LIMIT = 32000
+    MODEL_LIMIT = 30000
     RESERVED_OUTPUT = 4000
-    SYSTEM_PROMPT_ESTIMATE = 2000
+    SYSTEM_PROMPT_ESTIMATE = 1000
 
     availble_for_docs = MODEL_LIMIT - RESERVED_OUTPUT - SYSTEM_PROMPT_ESTIMATE - plan_tokens
     if availble_for_docs < 0:
@@ -224,25 +238,33 @@ def reviewer_node(state: ResearchState):
     """
     审核节点
     """
-    plan = state.get("plan", [])
+    task = state["task"]
+    # plan = state.get("plan", [])
     draft = state.get("draft", "")
+    revision_number = state.get("revision_number", 0)
+    max_revisions = state.get("max_revisions", 2)
+
+    logger.info(f"[Reviewer] 正在审核第 {revision_number+1} 版稿件...")
+    if revision_number >= max_revisions:
+        logger.info(f"[Reviewer] 已达到最大修订次数，强制通过")
+        return {"review": {"status": "pass", "reason": "达到最大修订次数"}}
+    
     llm = get_llm(model_tag="basic")
 
+    draft_segment = draft[:10000] if draft else ""
+    system_prompt = REVIEVER_PROMPT.format(task=task, draft_segment=draft_segment)
     prompt = ChatPromptTemplate.from_messages([
-        ("system", REVIEVER_PROMPT),
-        ("user", "Plan:{plan}\n\nDraft:{draft}\n\n请输出 JSON.")
+        ("system", "你是一个严格的审稿人,只输出JSON"),
+        ("user", "{content}")
     ])
-    chain = prompt | llm | StrOutputParser()
-    raw_res = chain.invoke({"plan": plan, "draft": draft})
+    chain = prompt | llm | JsonOutputParser()
 
     try:
-        json_match = re.search(r'\{.*\}', raw_res, re.DOTALL)
-        if json_match:
-            review_data = json.loads(json_match.group())
-            return {"review": review_data}
-        else:
-            res = json.loads(raw_res)
-            return {"review": res}
+        review_data = chain.invoke({"content":system_prompt})
+        return {
+            "review": review_data,
+            "revision_number": revision_number + 1
+        }
     except Exception as e:
         logger.error(f"Reviewer parsing failed: {e}")
-        return {"review": {"status": "pass", "reason": "解析失败兜底"}}
+        return {"review": {"status": "pass", "reason": "解析失败兜底"}, "revision_number": revision_number + 1}
