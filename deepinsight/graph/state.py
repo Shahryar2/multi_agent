@@ -20,7 +20,6 @@ class ResearchState(TypedDict):
     plan: List[SubTask]
     current_step_index: int
     documents: Annotated[List[Dict[str, Any]], operator.add]
-    sections: Annotated[List[Dict[str, Any]], operator.add] # 分段撰写的内容
     draft: str
     revision_number: int
     max_revisions: int

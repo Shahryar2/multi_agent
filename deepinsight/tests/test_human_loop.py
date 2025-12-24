@@ -4,7 +4,7 @@ def run_demo():
     app = create_graph()
 
     # 必须指定 thread_id 来区分不同用户的会话（用于 SqliteSaver）
-    config = {"configurable": {"thread_id": "user-123"}}
+    config = {"configurable": {"thread_id": "user-20251224"}}
 
     print("--- 阶段 1: 启动任务，生成计划（运行到中断） ---")
     inputs = {"task": "分析2025年AI手机市场", "max_revisions": 1, "revision_number": 0}

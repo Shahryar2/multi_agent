@@ -75,7 +75,7 @@ def normalize_data(results: Any,query: str,source: str = "tavily") -> List[Dict[
             for item in results:
                 if isinstance(item,dict):
                     url = item.get("url") or item.get("link") or ""
-                    title = item.get("title") or item.get("headline") or "Untitled"
+                    title = item.get("title") or item.get("headline") or (url[:30] if url else "参考资料")
                     # content(全文/较长片段)，snippet(短摘要)
                     text = item.get("content") or item.get("snippet") or item.get("text") or ""
                     segments.append(make_segment(query, url, title, text, source,extra=item))

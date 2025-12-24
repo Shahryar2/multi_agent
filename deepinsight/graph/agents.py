@@ -4,6 +4,8 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.output_parsers import JsonOutputParser,StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_tavily import TavilySearch
+from langchain_community.tools.tavily_search import TavilySearchResults
+# from langchain_tavily import TavilySearchResults
 from core.llm import get_llm
 import logging
 from deepinsight.utils.summarizer import map_summarize_documents
@@ -104,13 +106,17 @@ def research_node(state: ResearchState):
     query = current_task.get("description", "")
     print(f"---[Researcher]执行子任务 {idx+1}/{len(plan)}: {query}---")
 
-    tavily_tool = TavilySearch(max_results=5)
-    search_results = tavily_tool.invoke({"query": query})
+    tavily_tool = TavilySearchResults(max_results=5)
+    try:
+        raw_results = tavily_tool.invoke({"query": query})
+    except Exception as e:
+        logger.error(f"Tavily搜索失败: {e}")
+        raw_results = []
     
     new_documents = []
-    raw_results = search_results.get("results", []) 
     try:
         new_documents = normalize_data(raw_results, query)
+        new_documents = [d for d in new_documents if len(d.get("text",'')) > 50]
     except Exception as e:
         logger.error(f"数据清洗失败: {e}")
 
