@@ -1,11 +1,13 @@
 import json
 import re
+from langchain_core.documents import Document
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.output_parsers import JsonOutputParser,StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_tavily import TavilySearch
 from core.llm import get_llm
 import logging
+from deepinsight.tools.vector_store import VectorStore, vector_store
 from deepinsight.utils.summarizer import map_summarize_documents
 from deepinsight.utils.token_utils import count_tokens, term_document
 from tools.base import get_tools
@@ -14,6 +16,7 @@ from deepinsight.utils.normalizers import normalize_data
 from deepinsight.prompts.prompt_demo import CHAT_PROMPT, PLANNER_PROMPT, REACHER_PROMPT, ROUTER_PROMPT,WRITER_PROMPT,REVIEVER_PROMPT
 
 logger = logging.getLogger(__name__)
+vector_store = VectorStore()
 
 def router_node(state: ResearchState):
     """
@@ -114,6 +117,13 @@ def research_node(state: ResearchState):
     except Exception as e:
         logger.error(f"数据清洗失败: {e}")
 
+    if new_documents:
+        try:
+            vector_store.add_documents(new_documents)
+            print(f"[Researcher]已添加 {len(new_documents)} 条文档到向量存储")
+        except Exception as e:
+            logger.error(f"向量存储添加文档失败: {e}")
+
     step_summary = ""
     if new_documents:
         llm = get_llm(model_tag="smart")
@@ -156,29 +166,60 @@ def writer_node(state: ResearchState):
     for step in plan:
         plan_context += f"### 研究步骤:{step.get('description')}\n"
         plan_context += f"### 研究结论:{step.get('result','无结果')}\n\n"
+
+    logger.info(f"---[Writer] 正在基于大纲检索向量库 ---")
+    retrieved_docs = []
+    seen_contents = set()
+    rag_success = False
+
+    try:
+        for step in plan:
+            query = step.get("description")
+            results = vector_store.similarity_search(query, k=4)
+            for res in results:
+                content = res.get("text") if isinstance(res, dict) else res.page_content
+                if content not in seen_contents:
+                    if isinstance(res, dict):
+                        retrieved_docs.append(res)
+                    else:
+                        retrieved_docs.append({
+                            "text": res.page_content,
+                            "title": res.metadata.get("title", ""),
+                            "url": res.metadata.get("url", ""),
+                            "id": str(len(retrieved_docs)+1),
+                        })
+                    seen_contents.add(content)
+        if retrieved_docs:
+            rag_success = True
+            print(f"---[Writer] RAG检索成功，获取到 {len(retrieved_docs)} 条文档---")
+    except Exception as e:
+        logger.error(f"RAG检索失败: {e}")
+        rag_success = False
+
+    if not retrieved_docs or not rag_success:
+        logger.info(f"---[Writer] 向量库无结果，回退截断 ---")
     
-    # 计算占用token
-    plan_tokens = count_tokens(plan_context,model_tag="basic")
-    print(f"---[Writer] 骨架Tokens:{plan_tokens}---")
+        # 计算占用token
+        plan_tokens = count_tokens(plan_context,model_tag="basic")
+        print(f"---[Writer] 骨架Tokens:{plan_tokens}---")
 
-    # 这里的定值判断有必要吗
-    MODEL_LIMIT = 30000
-    RESERVED_OUTPUT = 4000
-    SYSTEM_PROMPT_ESTIMATE = 1000
+        MODEL_LIMIT = 30000
+        RESERVED_OUTPUT = 4000
+        SYSTEM_PROMPT_ESTIMATE = 1000
 
-    availble_for_docs = MODEL_LIMIT - RESERVED_OUTPUT - SYSTEM_PROMPT_ESTIMATE - plan_tokens
-    if availble_for_docs < 0:
-        logger.warning(f"计划内容过长，超出模型限制")
-        availble_for_docs = 1000
+        availble_for_docs = MODEL_LIMIT - RESERVED_OUTPUT - SYSTEM_PROMPT_ESTIMATE - plan_tokens
+        if availble_for_docs < 0:
+            logger.warning(f"计划内容过长，超出模型限制")
+            availble_for_docs = 1000
 
-    processed_docs = term_document(
-        documents,
-        max_tokens=availble_for_docs, 
-        model_tag="smart"
-    )
+        retrieved_docs = term_document(
+            documents,
+            max_tokens=availble_for_docs, 
+            model_tag="smart"
+        )
     
     citations = []
-    for idx,seg in enumerate(processed_docs,start=1):
+    for idx,seg in enumerate(retrieved_docs,start=1):
         citations.append({
             "index":idx,
             "id":seg.get("id"),
@@ -187,7 +228,10 @@ def writer_node(state: ResearchState):
             "snippet": seg.get("text")[:300]
         })
     
-    docs_context = "\n\n".join([f"[{i+1}] Title: {seg.get('title')}\nContent: {seg.get('text')}\nSource: {seg.get('url')}" for i, seg in enumerate(processed_docs)])
+    docs_context = "\n\n".join([
+        f"[{i+1}] Title: {seg.get('title')}\nContent: {seg.get('text')}\nSource: {seg.get('url')}" 
+        for i, seg in enumerate(retrieved_docs)
+    ])
 
     full_prompt = WRITER_PROMPT.format(task=task, plan_context=plan_context, docs_context=docs_context)
     
