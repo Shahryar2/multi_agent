@@ -142,8 +142,11 @@ def research_node(state: ResearchState):
         except Exception as e:
             logger.error(f"Researcher总结失败: {e}")
             step_summary = "本步骤未能生成总结。"
+            
+    related_doc_id = [doc.get("id") for doc in new_documents]
     current_task['result'] = step_summary
     current_task['status'] = 'completed'
+    current_task['doc_ids'] = related_doc_id
     plan[idx] = current_task
 
     return {
@@ -169,34 +172,50 @@ def writer_node(state: ResearchState):
 
     logger.info(f"---[Writer] 正在基于大纲检索向量库 ---")
     retrieved_docs = []
-    seen_contents = set()
+    seen_ids = set()    # 去重ID
     rag_success = False
 
-    try:
-        for step in plan:
-            query = step.get("description")
-            results = vector_store.similarity_search(query, k=4)
-            for res in results:
-                content = res.get("text") if isinstance(res, dict) else res.page_content
-                if content not in seen_contents:
+    doc_map = {doc.get("id"): doc for doc in documents if doc.get("id")}
+    for step in plan:
+        step_ids = step.get("doc_ids", [])
+        for doc_id in step_ids:
+            if doc_id in doc_map and doc_id not in seen_ids:
+                retrieved_docs.append(doc_map[doc_id])
+                seen_ids.add(doc_id)
+    print(f"---[Writer] 精准召回命中{len(retrieved_docs)}篇文档---")
+
+    if len(retrieved_docs) < 5:
+        logger.info(f"---[Writer] 精准召回不足，进行相似度检索补充 ---")
+        try:
+            for step in plan:
+                query = step.get("description")
+                results = vector_store.similarity_search(query, k=4)
+                for res in results:
                     if isinstance(res, dict):
-                        retrieved_docs.append(res)
+                        doc_data = res
                     else:
-                        retrieved_docs.append({
+                        doc_data = {
                             "text": res.page_content,
                             "title": res.metadata.get("title", ""),
                             "url": res.metadata.get("url", ""),
-                            "id": str(len(retrieved_docs)+1),
-                        })
-                    seen_contents.add(content)
-        if retrieved_docs:
-            rag_success = True
-            print(f"---[Writer] RAG检索成功，获取到 {len(retrieved_docs)} 条文档---")
-    except Exception as e:
-        logger.error(f"RAG检索失败: {e}")
-        rag_success = False
+                            "id": res.metadata.get("original_id") or str(hash(res.page_content))[:8]
+                        }
+                doc_id = doc_data.get("id")
+                if doc_id and doc_id in seen_ids:
+                    continue
+                # 简单去重
+                is_duplicate_content = any(
+                    d.get("text", "")[:50] == doc_data.get("text", "")[:50] 
+                    for d in retrieved_docs
+                )
+                if not is_duplicate_content:
+                    retrieved_docs.append(doc_data)
+                    if doc_id:
+                        seen_ids.add(doc_id)
+        except Exception as e:
+            logger.error(f"RAG检索失败: {e}")
 
-    if not retrieved_docs or not rag_success:
+    if not retrieved_docs:
         logger.info(f"---[Writer] 向量库无结果，回退截断 ---")
     
         # 计算占用token
