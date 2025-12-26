@@ -7,6 +7,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_tavily import TavilySearch
 from core.llm import get_llm
 import logging
+from concurrent.futures import ThreadPoolExecutor,as_completed
 from deepinsight.tools.vector_store import VectorStore, vector_store
 from deepinsight.utils.summarizer import map_summarize_documents
 from deepinsight.utils.token_utils import count_tokens, term_document
@@ -69,6 +70,11 @@ def planner_node(state: ResearchState):
         plan = chain.invoke({"user_input": user_input})
         if not isinstance(plan,list):
             plan = [plan]
+
+        for step in plan:
+            if "status" not in step:
+                step["status"] = "pending"
+
         return {"plan": plan,"current_step_index": 0}
     except Exception as e:
         print(f"---[Planner]解析失败，使用原始任务{e}---")
@@ -95,65 +101,113 @@ def orchestrator_node(state: ResearchState):
 
 def research_node(state: ResearchState):
     '''
-    单步研究节点,负责当前索引子任务
+    并行研究节点,负责当前索引子任务
     '''
-    idx = state.get("current_step_index", 0)
     plan = state.get("plan", [])
-    
-    if idx >= len(plan):
-        return {"current_step_index": idx+1}
-    
-    current_task = plan[idx]
-    query = current_task.get("description", "")
-    print(f"---[Researcher]执行子任务 {idx+1}/{len(plan)}: {query}---")
 
-    tavily_tool = TavilySearch(max_results=5)
-    search_results = tavily_tool.invoke({"query": query})
-    
-    new_documents = []
-    raw_results = search_results.get("results", []) 
-    try:
-        new_documents = normalize_data(raw_results, query)
-    except Exception as e:
-        logger.error(f"数据清洗失败: {e}")
+    # 并行任务实现
+    pending_tasks = []
+    pending_indices = []
+    for i,task in enumerate(plan):
+        if task.get("status") == "pending":
+            pending_tasks.append(task)
+            pending_indices.append(i)
 
-    if new_documents:
+    if not pending_tasks:
+        print(f"---[Researcher]无待处理子任务，跳过---")
+        return {"current_step_index": len(plan)}
+    
+    def execute_single_task(task_info):
+        query = task_info.get("description", "")
         try:
-            vector_store.add_documents(new_documents)
-            print(f"[Researcher]已添加 {len(new_documents)} 条文档到向量存储")
-        except Exception as e:
-            logger.error(f"向量存储添加文档失败: {e}")
+            tavily_tool = TavilySearch(max_results=5)
+            res = tavily_tool.invoke({"query": query})
+            raw_results = res.get("results", [])
 
-    step_summary = ""
-    if new_documents:
-        llm = get_llm(model_tag="smart")
-        # 构建小型上下文
-        termmed_docs = term_document(
-            new_documents,
-            max_tokens=10000,
-        )
-        context_text = "\n".join([f"- {doc.get('text')}" for doc in termmed_docs])
-        prompt = REACHER_PROMPT.format(query=query, context_text=context_text)
+            new_docs = normalize_data(raw_results, query)
+            if new_docs:
+                try:
+                    vector_store.add_documents(new_docs)
+                    print(f"[Researcher]已添加 {len(new_docs)} 条文档到向量存储")
+                except Exception as e:
+                    logger.error(f"向量存储添加文档失败: {e}")
 
-        try:
-            response = llm.invoke(prompt)
-            step_summary = response.content
-            print(f"---[Researcher]子任务总结: {step_summary}---")
+            step_summary = ""
+            if new_docs:
+                llm = get_llm(model_tag="smart")
+                # 构建小型上下文
+                termmed_docs = term_document(
+                    new_docs,
+                    max_tokens=6000,
+                )
+                context_text = "\n".join([f"- {doc.get('text')}" for doc in termmed_docs])
+                prompt = REACHER_PROMPT.format(query=query, context_text=context_text)
+
+                try:
+                    response = llm.invoke(prompt)
+                    step_summary = response.content
+                    print(f"---[Researcher]子任务总结: {step_summary}---")
+                except Exception as e:
+                    logger.error(f"Researcher总结失败: {e}")
+                    step_summary = "本步骤未能生成总结。"
+            else:
+                step_summary = "未能搜索到有效信息。"
+                    
+            return {
+                "success": True,
+                "results": step_summary,
+                "docs": new_docs,
+                "docs_ids": [doc.get("id") for doc in new_docs],
+                "raw_results": raw_results
+            }
+        
         except Exception as e:
-            logger.error(f"Researcher总结失败: {e}")
-            step_summary = "本步骤未能生成总结。"
-            
-    related_doc_id = [doc.get("id") for doc in new_documents]
-    current_task['result'] = step_summary
-    current_task['status'] = 'completed'
-    current_task['doc_ids'] = related_doc_id
-    plan[idx] = current_task
+            logger.error(f"任务'{query}'执行失败: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    # 线程池并行执行
+    results_map = {}
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_index = {
+            executor.submit(execute_single_task, task): idx 
+            for idx, task in zip(pending_indices, pending_tasks)
+        }
+        for future in as_completed(future_to_index):
+            idx = future_to_index[future]
+            try:
+                res = future.result()
+                results_map[idx] = res
+            except Exception as e:
+                logger.error(f"线程异常: {e}")
+                results_map[idx] = {
+                    "success": False,
+                    "error": "Thread Exception"
+                }
+
+    all_new_docs = []
+    all_raw_results = []
+
+    for idx, res in results_map.items():
+        if res.get("success"):
+            plan[idx]["status"] = "completed"
+            plan[idx]["result"] = res.get("results")
+            plan[idx]["doc_ids"] = res.get("docs_ids")
+
+            all_new_docs.extend(res.get("docs",[]))
+            all_raw_results.extend(res.get("raw_results",[]))
+            print(f"---[Researcher]子任务完成: {plan[idx]['description'][:50]}---")
+        else:
+            plan[idx]["status"] = "failed"
+            plan[idx]["result"] = f"任务失败: {res.get('error')}"
+            print(f"---[Researcher]子任务失败: {plan[idx]['description'][:50]}---")
 
     return {
-        "documents": new_documents,
-        "current_step_index": idx + 1,
+        "documents": all_new_docs,
+        "current_step_index": len(plan),
         "plan": plan,
-        "bg_investigation": raw_results
+        "bg_investigation": all_raw_results
     }
 
 def writer_node(state: ResearchState):
@@ -200,18 +254,18 @@ def writer_node(state: ResearchState):
                             "url": res.metadata.get("url", ""),
                             "id": res.metadata.get("original_id") or str(hash(res.page_content))[:8]
                         }
-                doc_id = doc_data.get("id")
-                if doc_id and doc_id in seen_ids:
-                    continue
-                # 简单去重
-                is_duplicate_content = any(
-                    d.get("text", "")[:50] == doc_data.get("text", "")[:50] 
-                    for d in retrieved_docs
-                )
-                if not is_duplicate_content:
-                    retrieved_docs.append(doc_data)
-                    if doc_id:
-                        seen_ids.add(doc_id)
+                    doc_id = doc_data.get("id")
+                    if doc_id and doc_id in seen_ids:
+                        continue
+                    # 简单去重
+                    is_duplicate_content = any(
+                        d.get("text", "")[:50] == doc_data.get("text", "")[:50] 
+                        for d in retrieved_docs
+                    )
+                    if not is_duplicate_content:
+                        retrieved_docs.append(doc_data)
+                        if doc_id:
+                            seen_ids.add(doc_id)
         except Exception as e:
             logger.error(f"RAG检索失败: {e}")
 
