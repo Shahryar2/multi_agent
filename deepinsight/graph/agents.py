@@ -46,6 +46,14 @@ def router_node(state: ResearchState):
 def planner_node(state: ResearchState):
     """
     拆解任务
+    output:
+    {
+     "plan": [
+        {"description": str, "status": str},
+        ...
+     ],
+     "current_step_index": int
+    }
     """
     task = state["task"]
     catagory = state.get("catagory","general")
@@ -57,8 +65,21 @@ def planner_node(state: ResearchState):
         user_input = f"任务：{task}"
     else:
         print(f"---[Planner]收到Review反馈，调整计划{review_feedback}---")
-        system_prompt = """
+        system_prompt = f"""
+        你是一个具有深度反思能力的首席分析师。
+        你之前的研究计划未能通过审核，现在需要基于反馈进行反思并调整计划。
         
+        【审核反馈】
+        状态：{review_feedback.get('status')}
+        意见：{review_feedback.get('reason')}
+        缺失内容：{review_feedback.get('missing')}
+        
+        【反思要求】
+        1. 分析为什么之前的研究没能覆盖到这些缺失点。
+        2. 针对缺失内容，增加 1-2 个极其精准的搜索或分析步骤。
+        3. 保持原有已完成步骤的逻辑连贯性，不要删除已有的正确结论。
+        
+        请以 JSON 数组格式输出更新后的完整执行计划。
     """
         user_input = f"原任务：{task}\n 审核意见：{review_feedback.get('missing','内容缺失')}\n"
 
@@ -104,6 +125,16 @@ def orchestrator_node(state: ResearchState):
 def research_node(state: ResearchState):
     '''
     并行研究节点,负责当前索引子任务
+    output:
+    {
+     "documents": [{"id": str, "text": str, "title": str, "url": str}, ...],
+     "plan":[
+        {"description": str, "status": str, "result": str, "doc_ids": [str]},
+        {"description": str, "status": str, "result": str},
+     ],
+     "current_step_index": int,
+     "bg_investigation": [...]
+    }
     '''
     plan = state.get("plan", [])
 
@@ -215,6 +246,20 @@ def research_node(state: ResearchState):
 def writer_node(state: ResearchState):
     """
     撰写
+    output:
+    {
+      "draft": str,
+      "citations": [
+        {
+         "index": int,
+         "id": str, 
+         "title": str,
+         "url": str, 
+         "snippet": str
+        },
+        ...
+      ]
+    }
     """
     task = state["task"]
     plan = state.get("plan",[])
@@ -324,34 +369,33 @@ def writer_node(state: ResearchState):
     
     return {"draft": final_draft,"citations": citations}
 
-def simple_researcher_node(state: ResearchState):
-    """
-    简单搜索节点
-    """
-    task = state["task"]
-    
-    tavily_tool = TavilySearch(max_results=1)
 
-    logger.info(f"调用简单搜索工具，查询：{task}")
-    print(f"搜索结果:{tavily_tool.invoke({'query': task})}")
-
-def chat_node(state: ResearchState):
+def verifier_node(state: ResearchState):
     """
-    聊天节点
+    验证节点
     """
-    task = state["task"]
-    llm = get_llm()
+    draft = state.get("draft", "")
+    citations = state.get("citations", [])
+    revision_number = state.get("revision_number", 0)
+    max_revisions = state.get("max_revisions", 3)
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", CHAT_PROMPT),
-        ("user", "{task}")
-    ])
+    main_indices = draft.split("## 引用列表")[0]
+    used_indices = set(re.findall(r"\[(\d+)\]", main_indices))
+    used_indices = {int(i) for i in used_indices}
+
+    existing_indices = {c['index'] for c in citations}
+    missing_indices = used_indices - existing_indices
+
+    if missing_indices and revision_number < max_revisions:
+        print(f"---[Verifier] 发现缺失引用索引: {missing_indices},正在标记修正---")
+        return {
+            "next": "writer",
+            "revision_number": revision_number + 1
+        }
+    if missing_indices:
+        print(f"---[Verifier] 达到最大修订次数或无缺少索引，强制通过---")
     
-    chain = prompt | llm | StrOutputParser()
-    response = chain.invoke({"task": task})
-    
-    logger.info(f"聊天响应：{response}")
-    print(f"聊天响应：{response}")
+    return {"next": "reviewer"}
 
 def reviewer_node(state: ResearchState):
     """
@@ -387,3 +431,33 @@ def reviewer_node(state: ResearchState):
     except Exception as e:
         logger.error(f"Reviewer parsing failed: {e}")
         return {"review": {"status": "pass", "reason": "解析失败兜底"}, "revision_number": revision_number + 1}
+    
+
+def simple_researcher_node(state: ResearchState):
+    """
+    简单搜索节点
+    """
+    task = state["task"]
+    
+    tavily_tool = TavilySearch(max_results=1)
+
+    logger.info(f"调用简单搜索工具，查询：{task}")
+    print(f"搜索结果:{tavily_tool.invoke({'query': task})}")
+
+def chat_node(state: ResearchState):
+    """
+    聊天节点
+    """
+    task = state["task"]
+    llm = get_llm()
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", CHAT_PROMPT),
+        ("user", "{task}")
+    ])
+    
+    chain = prompt | llm | StrOutputParser()
+    response = chain.invoke({"task": task})
+    
+    logger.info(f"聊天响应：{response}")
+    print(f"聊天响应：{response}")

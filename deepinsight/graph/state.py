@@ -21,7 +21,9 @@ class ResearchState(TypedDict):
     current_step_index: int
     documents: Annotated[List[Dict[str, Any]], operator.add]
     draft: str
+    citations: List[Dict[str, Any]]
     revision_number: int
     max_revisions: int
     next: str
     bg_investigation: Annotated[List[Dict[str, Any]], operator.add]
+    review: Dict[str, Any]

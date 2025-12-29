@@ -6,19 +6,11 @@
 #### 一、接下来要实现的功能（优先级）
 - 1) 内容溯源（Citations）与文档结构化（必须）-ing
   - 1) 短期为解决token限制问题先快速截断；
-<<<<<<< HEAD
-       关于截断的处理由两部分1.针对文档 2.针对对话
-  - 2) Map-Reduce摘要（√）
-  - 3) 后期补充实现向量库+检索增强
-- 2) Reviewer（审稿/自检）节点：实现打回-重搜循环（高优先）√
-- 3) 文档聚合(Map-Reduce 摘要√)与去重(√) + 向量检索缓存（中优先）
-=======
        关于截断的处理由两部分
        1.针对文档 √
        2.针对对话
   - 3) 后期补充实现向量库 √ +检索增强  
 - 3) 向量检索缓存（中优先）
->>>>>>> master
 - 4) 并行 Researcher（并发抓取）与速率限制（中优先） √
 - 5) API：Human-in-loop 的 HTTP 接口（获取状态、更新计划、继续执行）（高优先）
 - 6) 持久化 Checkpointer 从内存换成 SQLite/Postgres（高优先）√
@@ -28,45 +20,7 @@
 
 ---
 
-基于对你当前项目代码（DeepInsight）的深度分析，你的系统已经完成了从“Demo”到“MVP（最小可行性产品）”的跨越。核心的 **Orchestrator Loop（编排循环）**、**Token 动态管理**、**引用溯源**以及**基础的反馈闭环**都已经跑通。
-
-以下是针对你项目现状的下一步发展路线图：
-
-### 1. 应该如何进行下一步？（战略方向）
-
-目前的系统虽然能跑，但还比较“脆”。下一步的核心战略应从 **“功能实现”** 转向 **“质量增强与工程化落地”**。
-
-*   **短期（1周内）**：死磕“内容质量”。现在的报告虽然有引用，但深度和逻辑性可能还不如人类分析师。需要优化 Prompt 和 Researcher 的清洗逻辑。
-*   **中期（2-3周）**：补全“缺失模块”。主要是向量数据库（记忆）和并发加速。
-*   **长期（1个月+）**：工程化与交互。API 封装、前端界面、多用户并发支持。
-
----
-
-### 2. 下一步具体是什么？（战术执行）
-
-**优先级最高的任务是：引入向量数据库（Vector Store）实现“长期记忆”与“精准检索”。**  √
-
-*   **为什么？** 目前你的 `Researcher` 只是把搜到的东西简单清洗后堆在 `documents` 列表里。
-    *   如果搜了 50 个网页，Token 依然不够用，只能截断。
-    *   Writer 写报告时，是在“盲人摸象”，只能看到被截断后的片段，容易丢失关键细节。
-*   **怎么做？**
-    1.  引入 `ChromaDB` 或 `FAISS`。
-    2.  在 `Researcher` 阶段，将清洗后的文本切片（Chunking），存入向量库。
-    3.  在 `Writer` 阶段，不再把所有文档塞进 Prompt，而是根据“大纲”去向量库里 **Retrieve（检索）** 最相关的片段。
-
----
-
 ### 3. 项目未实现的具体功能是？（功能缺口）
-
-根据你的 todo.md 和代码现状，以下功能尚未实现：
-
-1.  **向量检索增强生成 (RAG)**：
-    *   *现状*：`documents` 是一个 Python List，靠 `term_document` 暴力截断。
-    *   *目标*：基于语义相似度的检索，只把最相关的 10% 内容喂给 LLM，大幅提升 Token 利用率和回答准确度。
-
-2.  **并行研究 (Parallel Research)**：
-    *   *现状*：`orchestrator` 每次只调度一个 `researcher` 任务，串行执行。如果计划有 5 步，速度会很慢。
-    *   *目标*：利用 `LangGraph` 的并行分支能力，同时启动多个 Researcher 线程，最后汇总结果。
 
 3.  **人机交互接口 (Human-in-the-loop API)**：
     *   *现状*：目前只能通过 `test_human_loop.py` 在控制台交互。
@@ -90,13 +44,115 @@
     *   *问题*：目前的 Planner 在收到 Reviewer 反馈后，虽然代码里写了逻辑，但 Prompt 比较简单，容易导致死循环（反复修改却改不对）。
     *   *优化*：引入 `Reflection`（反思）机制，让 Planner 先分析为什么上次失败，再生成新计划。
 
-3.  **Writer 的“幻觉控制”**：
-    *   *问题*：虽然强制要求引用 `[1]`，但 LLM 偶尔还是会编造引用或引用错误的 ID。
-    *   *优化*：在 Writer 输出后，增加一个 **Verifier（验证器）** 节点，专门检查文中的 `[x]` 是否在 `documents` 中真实存在，如果不存在则自动修正或删除。
 
-4.  **工程结构**：
-    *   *问题*：agents.py 文件过大，所有 Node 都在里面。
-    *   *优化*：将每个 Node 拆分到独立文件（如 `graph/nodes/researcher.py`），保持代码整洁。
 
-### 总结建议
 
+### 一、 待实现的核心功能及代码细节
+
+目前项目已具备“骨架”，但要达到“产品级”，以下三个功能是优先级最高的：
+
+#### 1. 人机协同 (Human-in-the-loop) 的 API 完善
+**目标**：目前中断逻辑只在本地测试有效。需要通过 API 让前端能获取当前计划、修改计划并点击“继续”。
+
+**实现步骤**：
+1.  **状态获取接口**：读取当前 `thread_id` 的 `snapshot`。
+2.  **状态更新接口**：允许用户修改 `plan`。
+3.  **恢复执行接口**：发送 `None` 输入触发图继续运行。
+
+**代码细节 (server.py)**：
+```python
+@app.get("/task/{thread_id}/state")
+async def get_task_state(thread_id: str):
+    config = {"configurable": {"thread_id": thread_id}}
+    snapshot = graph.get_state(config)
+    return {
+        "next_node": snapshot.next,
+        "values": snapshot.values, # 包含当前的 plan
+        "created_at": snapshot.created_at
+    }
+
+@app.post("/task/{thread_id}/approve")
+async def approve_task(thread_id: str, modified_plan: list = None):
+    config = {"configurable": {"thread_id": thread_id}}
+    # 如果用户修改了计划，先更新状态
+    if modified_plan:
+        graph.update_state(config, {"plan": modified_plan})
+    
+    # 触发继续执行 (resume)
+    # 注意：这里需要异步处理，或者通过流式接口返回
+    async def stream_resume():
+        async for event in graph.astream(None, config=config):
+            yield f"data: {json.dumps(event)}\n\n"
+            
+    return StreamingResponse(stream_resume(), media_type="text/event-stream")
+```
+
+#### 2. 多场景策略模式 (Multi-Scenario Strategy)
+**目标**：让系统不仅能写“研报”，还能做“竞品对比”、“技术溯源”等。
+
+**实现步骤**：
+1.  在 `ResearchState` 中增加 `category` 字段。
+2.  修改 `router_node` 识别细分场景。
+3.  在 `planner` 和 `writer` 中根据 `category` 切换 Prompt。
+
+**代码细节 (agents.py)**：
+```python
+# 在 planner_node 中增加分支
+def planner_node(state: ResearchState):
+    category = state.get("category", "general_report")
+    
+    # 策略映射
+    prompts = {
+        "comparison": "你是一个对比分析专家，请按维度（性能、价格、口碑）拆解任务...",
+        "timeline": "你是一个历史学家，请按时间线（起因、发展、现状）拆解任务...",
+        "general_report": PLANNER_PROMPT
+    }
+    
+    system_prompt = prompts.get(category, PLANNER_PROMPT).format(...)
+    # ... 后续逻辑 ...
+```
+
+#### 3. 引用验证器 (Citation Verifier)
+**目标**：防止 Writer 幻觉（即在文中写了 `[1]` 但参考文献里其实没这回事）。
+
+**实现步骤**：
+1.  增加一个 `verifier_node`。
+2.  解析 `draft` 中的所有 `[n]`。
+3.  检查 `citations` 列表中是否存在对应的索引。
+4.  如果不存在，强制 LLM 修正或删除该引用。
+
+---
+
+### 二、 代码薄弱功能自查 (Self-Audit)
+
+通过对你现有代码的分析，以下几点存在潜在风险，建议优化：
+
+#### 1. 状态膨胀 (State Bloat)
+*   **问题**：`ResearchState` 中的 `documents` 是一个 `Annotated[List, operator.add]`。
+*   **风险**：如果一个任务搜索了 50 个网页，`documents` 列表会非常大。由于 LangGraph 每次经过节点都会序列化状态存入 SQLite，这会导致 **数据库读写变慢**，甚至超过消息长度限制。
+*   **优化**：`documents` 应该只存储 **元数据和摘要**，完整的原文应该只存在向量库（ChromaDB）中。
+
+#### 2. 并行研究的速率限制 (Rate Limiting)
+*   **问题**：`ThreadPoolExecutor(max_workers=5)`。
+*   **风险**：如果 5 个线程同时调用 `Tavily` 和 `LLM`，极易触发 API 的 **429 (Too Many Requests)** 错误。
+*   **优化**：引入 `asyncio.Semaphore(3)` 或在线程池执行函数中加入随机抖动（`time.sleep(random.uniform(0.5, 2))`）。
+
+#### 3. 向量库 ID 碰撞与去重
+*   **问题**：目前的 `normalizers.py` 使用 `uuid4` 或简单的 `hash`。
+*   **风险**：如果用户多次运行同一个任务，向量库会存入大量重复内容，导致检索结果全是“车轱辘话”。
+*   **优化**：使用 `URL + 标题` 的 MD5 作为 ID。
+
+#### 4. Writer 的“精准召回”逻辑缺陷
+*   **问题**：在 `writer_node` 中，你使用了 `doc_map = {doc.get("id"): doc for doc in documents}`。
+*   **风险**：如果 `documents` 因为 Token 限制被清理了，或者 Researcher 存入向量库后没把完整 doc 放回 state，这里就拿不到原文。
+*   **优化**：增加一个从向量库根据 ID 直接取回文档的方法：`vector_store.get_by_ids(step_ids)`。
+
+#### 5. 错误恢复能力
+*   **问题**：如果某个子任务 `failed`，目前只是打印了日志。
+*   **风险**：Writer 可能会因为缺少关键环节的数据而写出错误的结论。
+*   **优化**：在 `orchestrator` 中增加逻辑：如果发现有 `failed` 的任务，尝试重试一次，或者提示用户手动干预。
+
+### 下一步行动建议
+1.  **修复 `doc_data` 作用域 Bug**（你上次提到的那个）。
+2.  **实现 API 的 `approve` 逻辑**，这是打通前后端交互的关键。
+3.  **优化 `ResearchState`**，减少在 State 中传递大文本，多利用向量库。

@@ -13,6 +13,7 @@ from deepinsight.graph.agents import (
     planner_node, 
     research_node,  
     writer_node,
+    verifier_node
 )
 from graph.state import ResearchState
 
@@ -27,6 +28,7 @@ def create_graph():
     workflow.add_node("orchestrator", orchestrator_node)
     workflow.add_node("researcher", research_node)
     workflow.add_node("writer", writer_node)
+    workflow.add_node("verifier", verifier_node)
     workflow.add_node("reviewer", reviewer_node)
     workflow.add_node("chat", chat_node)
    
@@ -55,7 +57,16 @@ def create_graph():
     )
     
     workflow.add_edge("researcher", "orchestrator")
-    workflow.add_edge("writer", "reviewer")
+    workflow.add_edge("writer", "verifier")
+
+    workflow.add_conditional_edges(
+        "verifier",
+        lambda state: state.get("next"),
+        {
+            "writer": "writer",
+            "reviewer": "reviewer",
+        }
+    )
 
     workflow.add_conditional_edges(
         "reviewer",
