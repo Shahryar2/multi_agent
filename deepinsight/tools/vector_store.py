@@ -74,6 +74,12 @@ class VectorStore:
             logger.error(f"[Vector]通过ID获取文档失败: {e}")
             return []
 
+    def get_documents_by_ids(self, original_ids:List[str]) -> List[Dict[str, Any]]:
+        """
+        Alias for get_by_id to be compatible with agents.py
+        """
+        return self.get_by_id(original_ids)
+
     def add_documents(self, data_list: List[Dict[str, Any]]):
         """添加文档到向量存储"""
         docs = []

@@ -1,6 +1,6 @@
-def main():
-    print("Hello from multi-agent!")
+import os
+import sys
 
-
+# 启动 Streamlit
 if __name__ == "__main__":
-    main()
+    os.system("streamlit run deepinsight/ui.py")

@@ -6,12 +6,14 @@ from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-import os
 
-from langchain_core.messages import HumanMessage
+# 直接使用同步的 create_graph，因为它内部已经配置了 MemorySaver
 from deepinsight.graph.workflow import create_graph
+
+# 初始化全局图实例
+# 因为 MemorySaver 是线程安全的内存字典，全局单例即可
+graph = create_graph()
 
 app = FastAPI(
     title="DeepInsight Agent API",
@@ -28,21 +30,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Graph
-# Ensure we are in the right directory or path is setup
-graph = create_graph()
+# In-memory store for pending tasks
+PENDING_TASKS: Dict[str, Dict[str, Any]] = {}
 
 # --- Data Models ---
-
 class ResearchRequest(BaseModel):
     query: str
-
-class PlanItem(BaseModel):
-    id: int
-    type: str
-    description: str
-    status: str = "pending"
-    result: Optional[str] = None
 
 class ApproveRequest(BaseModel):
     thread_id: str
@@ -54,14 +47,9 @@ class ApproveRequest(BaseModel):
 async def start_research(request: ResearchRequest):
     """
     Start a new research session.
-    Initialize state with task query but don't run yet.
     """
     thread_id = str(uuid.uuid4())
-    config = {"configurable": {"thread_id": thread_id}}
     
-    # Initialize state with the user query
-    # We use update_state to populate the graph with initial data
-    # effectively "priming" it for the first run.
     initial_state = {
         "task": request.query,
         "plan": [],
@@ -70,51 +58,51 @@ async def start_research(request: ResearchRequest):
         "bg_investigation": []
     }
     
-    graph.update_state(config, initial_state)
+    PENDING_TASKS[thread_id] = initial_state
+    print(f"--- [API] Task Created: {thread_id} ---")
     
     return {"thread_id": thread_id, "status": "created"}
 
 @app.get("/research/{thread_id}/stream")
 async def stream_research(thread_id: str):
     """
-    Stream updates from the agent workflow.
-    Automatically resumes from current checkpoint.
+    Stream updates using MemorySaver (Robust & Simple)
     """
-    
     async def event_generator():
         config = {"configurable": {"thread_id": thread_id}}
         
+        inputs = None
+        if thread_id in PENDING_TASKS:
+            print(f"--- [API] Starting New Task for {thread_id} ---")
+            inputs = PENDING_TASKS.pop(thread_id)
+        else:
+            print(f"--- [API] Resuming Task for {thread_id} ---")
+            
         try:
-            # astream(None) resumes from the current state/checkpoint
-            # stream_mode="updates" gives us the node outputs
-            async for event in graph.astream(None, config, stream_mode="updates"):
-                # Handle different event structures
+            # MemorySaver 虽然是基于内存的，但 LangGraph 的 astream 方法依然是异步的
+            # 这里的调用方式是标准的异步流式调用
+            async for event in graph.astream(inputs, config, stream_mode="updates"):
+                # 获取当前全局状态 (使用同步 get_state 即可，因为 MemorySaver 是内存操作)
+                current_snapshot = graph.get_state(config)
+                global_plan = current_snapshot.values.get("plan", [])
+                
                 for node_name, node_state in event.items():
-                    # Extract Plan
-                    current_plan = node_state.get("plan", [])
-                    
-                    # Extract Messages (if any)
-                    messages = []
-                    # Depending on your State definition, access messages
-                    # ResearchState doesn't usually have 'messages' unless added.
-                    # But we can send status updates.
-                    
-                    # Prepare payload
+                    print(f"--- [API] Node Executed: {node_name} ---")
                     payload = {
                         "node": node_name,
-                        "plan": current_plan,
-                        # Send the whole state values needed for UI?
-                        # Or just deltas.
-                        "step_index": node_state.get("current_step_index", 0)
+                        "plan": global_plan,
+                        "step_index": current_snapshot.values.get("current_step_index", 0)
                     }
-                    
                     yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    # 防止前端过载
+                    await asyncio.sleep(0.05)
             
-            # Check status after stream ends (could be interrupt or done)
+            # 检查最终状态
             snapshot = graph.get_state(config)
+            print(f"--- [API] Stream Ended. Next: {snapshot.next} ---")
+            
             if snapshot.next:
-                # Interrupted
-                # Send the *current* state so UI can show it for editing
+                print(f"--- [API] Interrupted at {snapshot.next} ---")
                 payload = {
                     "type": "interrupt",
                     "next": snapshot.next,
@@ -122,24 +110,28 @@ async def stream_research(thread_id: str):
                 }
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
             else:
-                # Finished
-                res = snapshot.values.get("bg_investigation", []) 
-                # Or final result?
+                print("--- [API] Workflow Completed ---")
+                final_result = snapshot.values.get("draft", "") or \
+                               snapshot.values.get("bg_investigation", "")
+                
+                if final_result:
+                     yield f"data: {json.dumps({'type': 'result', 'content': str(final_result)}, ensure_ascii=False)}\n\n"
+                
                 yield "data: [DONE]\n\n"
                 
         except Exception as e:
+            print(f"--- [API Error] {e} ---")
+            import traceback
+            traceback.print_exc()
             yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
-            # Prevent infinite loops in client if error persists
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.get("/research/{thread_id}/state")
 async def get_state(thread_id: str):
-    """
-    Get current state (useful for fetching plan before approval)
-    """
     config = {"configurable": {"thread_id": thread_id}}
+    # 同步调用 get_state
     snapshot = graph.get_state(config)
     
     if not snapshot:
@@ -153,15 +145,12 @@ async def get_state(thread_id: str):
 
 @app.post("/research/approve")
 async def approve_plan(request: ApproveRequest):
-    """
-    Update the plan and resume execution.
-    """
     config = {"configurable": {"thread_id": request.thread_id}}
     
-    # Update the plan in the state
+    print(f"--- [API] Approving Plan for {request.thread_id} ---")
+    # 同步调用 update_state
     graph.update_state(config, {"plan": request.plan})
     
-    # The client will reconnect to /stream to resume
     return {"status": "updated", "message": "Plan updated. Reconnect to stream to continue."}
 
 @app.get("/health")

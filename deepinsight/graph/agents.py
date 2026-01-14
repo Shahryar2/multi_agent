@@ -30,22 +30,42 @@ def router_node(state: ResearchState):
     路由节点
     """
     task = state["task"]
+    logger.info(f"Router received task: {task}")
+    if not task:
+        logger.error("Task is empty!")
+        # Fallback or error handling
+        return {"next": "chat"}
+
     llm = get_llm(model_tag="smart")
     
     system_prompt = ROUTER_PROMPT
 
+    # Combine system prompt into user message to compatibility with some proxies
     prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("user", "{task}")
+        ("user", f"{system_prompt}\n\n用户输入: {{task}}")
     ])
     chain = prompt | llm | StrOutputParser()
-    category = chain.invoke({"task": task})
+    try:
+        category = chain.invoke({"task": task})
+        logger.info(f"Router category: {category}")
+    except Exception as e:
+        logger.error(f"Router LLM failed: {e}")
+        # Default fallback
+        category = "report"
+
+    # Normalize category
+    category = category.strip().strip('"').lower()
+
     if "report" in category:
-        return {"next": "planner"}
+        return {"next": "planner", "catagory": "report"}
     if "search" in category:
-        return {"next": "simple_researcher"}
+        # Fallback search to planner for now as simple_researcher is not wired
+        return {"next": "planner", "catagory": "report"}
     if "chat" in category:
-        return {"next": "chat"}
+        return {"next": "chat", "catagory": "chat"}
+    
+    # Default to planner
+    return {"next": "planner", "catagory": "report"}
 
 def planner_node(state: ResearchState):
     """
@@ -60,6 +80,7 @@ def planner_node(state: ResearchState):
     }
     """
     task = state["task"]
+    # Fix typo in State definition variable name matches
     catagory = state.get("catagory","general")
     review_feedback = state.get("review",{})
     llm = get_llm(model_tag="smart")
@@ -87,14 +108,21 @@ def planner_node(state: ResearchState):
     """
         user_input = f"原任务：{task}\n 审核意见：{review_feedback.get('missing','内容缺失')}\n"
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("user", "{user_input}")
-    ])
+    # 使用 JsonOutputParser 获取格式说明
+    parser = JsonOutputParser()
+    format_instructions = parser.get_format_instructions()
+
+    # 显式构建 Prompt 字符串
+    full_prompt = f"{system_prompt}\n\n{format_instructions}\n\n用户输入: {user_input}"
     
-    chain = prompt | llm | JsonOutputParser()
+    # 显式使用 HumanMessage
+    messages = [HumanMessage(content=full_prompt)]
+    
     try:
-        plan = chain.invoke({"user_input": user_input})
+        response = llm.invoke(messages)
+        # 手动解析
+        plan = parser.parse(response.content)
+
         if not isinstance(plan,list):
             plan = [plan]
 
@@ -196,10 +224,12 @@ def research_node(state: ResearchState):
                     max_tokens=6000,
                 )
                 context_text = "\n".join([f"- {doc.get('text')}" for doc in termmed_docs])
-                prompt = REACHER_PROMPT.format(query=query, context_text=context_text)
+                prompt_content = REACHER_PROMPT.format(query=query, context_text=context_text)
 
                 try:
-                    response = rate_limited_call(llm.invoke, prompt)
+                    # 使用 HumanMessage 列表调用，确保兼容性
+                    messages = [HumanMessage(content=prompt_content)]
+                    response = rate_limited_call(llm.invoke, messages)
                     step_summary = response.content
                     print(f"---[Researcher]子任务总结: {step_summary}---")
                 except Exception as e:
@@ -399,9 +429,9 @@ def writer_node(state: ResearchState):
 
     full_prompt = WRITER_PROMPT.format(task=task, plan_context=plan_context, docs_context=docs_context)
     
+    # Combine messages for compatibility
     messages = [
-        SystemMessage(content="你是一个专业的研报撰写专家。"),
-        HumanMessage(content=full_prompt)
+        HumanMessage(content=f"你是一个专业的研报撰写专家。\n\n{full_prompt}")
     ]
     draft = llm.invoke(messages)
     content = draft.content
@@ -460,14 +490,18 @@ def reviewer_node(state: ResearchState):
 
     draft_segment = draft[:10000] if draft else ""
     system_prompt = REVIEVER_PROMPT.format(task=task, draft_segment=draft_segment)
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "你是一个严格的审稿人,只输出JSON"),
-        ("user", "{content}")
-    ])
-    chain = prompt | llm | JsonOutputParser()
-
+    
+    # 显式重构，增强对 Proxy API 的兼容性
+    parser = JsonOutputParser()
+    format_instructions = parser.get_format_instructions()
+    
+    full_prompt = f"你是一个严格的审稿人,只输出JSON\n\n{format_instructions}\n\n待审核内容:\n{system_prompt}"
+    
     try:
-        review_data = chain.invoke({"content":system_prompt})
+        messages = [HumanMessage(content=full_prompt)]
+        response = llm.invoke(messages)
+        review_data = parser.parse(response.content)
+
         return {
             "review": review_data,
             "revision_number": revision_number + 1
@@ -495,9 +529,9 @@ def chat_node(state: ResearchState):
     task = state["task"]
     llm = get_llm()
 
+    # Combine messages
     prompt = ChatPromptTemplate.from_messages([
-        ("system", CHAT_PROMPT),
-        ("user", "{task}")
+        ("user", f"{CHAT_PROMPT}\n\nUser: {{task}}")
     ])
     
     chain = prompt | llm | StrOutputParser()

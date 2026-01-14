@@ -40,10 +40,6 @@
     *   *问题*：`normalize_data` 只是简单的正则清洗。网页上的导航栏、广告、版权声明依然会占用大量 Token。
     *   *优化*：引入专门的 HTML 解析库（如 `trafilatura`）或使用 LLM 进行二次清洗（Extraction）。
 
-2.  **Planner 的“动态调整”逻辑**：
-    *   *问题*：目前的 Planner 在收到 Reviewer 反馈后，虽然代码里写了逻辑，但 Prompt 比较简单，容易导致死循环（反复修改却改不对）。
-    *   *优化*：引入 `Reflection`（反思）机制，让 Planner 先分析为什么上次失败，再生成新计划。
-
 
 
 
@@ -111,17 +107,6 @@ def planner_node(state: ResearchState):
     system_prompt = prompts.get(category, PLANNER_PROMPT).format(...)
     # ... 后续逻辑 ...
 ```
-
-#### 3. 引用验证器 (Citation Verifier)
-**目标**：防止 Writer 幻觉（即在文中写了 `[1]` 但参考文献里其实没这回事）。
-
-**实现步骤**：
-1.  增加一个 `verifier_node`。
-2.  解析 `draft` 中的所有 `[n]`。
-3.  检查 `citations` 列表中是否存在对应的索引。
-4.  如果不存在，强制 LLM 修正或删除该引用。
-
----
 
 ### 二、 代码薄弱功能自查 (Self-Audit)
 

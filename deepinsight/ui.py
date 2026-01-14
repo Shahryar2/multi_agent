@@ -180,7 +180,7 @@ if st.session_state.status == "interrupted":
 
 # 4. Final Results
 if st.session_state.status == "done":
-    st.balloons()
+    # st.balloons()
     st.success("研究任务已执行完毕!")
     st.subheader("最终执行清单")
     st.table(st.session_state.plan)

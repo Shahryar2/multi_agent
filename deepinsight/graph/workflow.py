@@ -1,7 +1,6 @@
 import sqlite3
 from typing import Annotated, List, TypedDict, Union
-from langgraph.checkpoint.sqlite import SqliteSaver
-# from langgraph.checkpoint. import SqliteSaver
+from langgraph.checkpoint.memory import MemorySaver 
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
@@ -80,9 +79,9 @@ def create_graph():
     # 聊天
     workflow.add_edge("chat", END)
 
-    # --- 持久化配置 (SqliteSaver) ---
-    conn = sqlite3.connect("checkpoints.sqlite", check_same_thread=False)
-    memory = SqliteSaver(conn)
+    # --- 持久化配置 (MemorySaver) ---
+    # 纯内存存储，重启会丢失数据，但极其稳定，适合演示
+    memory = MemorySaver()
 
     # 编译图
     app = workflow.compile(checkpointer=memory, interrupt_after=["planner"])
