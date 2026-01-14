@@ -48,6 +48,32 @@ class VectorStore:
                 persist_directory=self.persist_directory
             )
 
+    def get_by_id(self, original_ids:List[str]) -> List[Dict[str, Any]]:
+        """通过原始 ID 获取文档"""
+        if not original_ids:
+            return []
+        try:
+            results = self.vector_store.get(
+                where={"original_id": {"$in": original_ids}}
+            )
+            formatted = []
+            seen_ids = set()
+            if results['documents']:
+                for doc, meta in zip(results['documents'], results['metadatas']):
+                    oid = meta.get("original_id")
+                    if oid and oid not in seen_ids:
+                        formatted.append({
+                            "text": doc,
+                            "title": meta.get("title", ""),
+                            "url": meta.get("url", ""),
+                            "id": oid
+                        })
+                        seen_ids.add(oid)
+            return formatted
+        except Exception as e:
+            logger.error(f"[Vector]通过ID获取文档失败: {e}")
+            return []
+
     def add_documents(self, data_list: List[Dict[str, Any]]):
         """添加文档到向量存储"""
         docs = []

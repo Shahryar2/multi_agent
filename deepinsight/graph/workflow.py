@@ -15,7 +15,7 @@ from deepinsight.graph.agents import (
     writer_node,
     verifier_node
 )
-from graph.state import ResearchState
+from deepinsight.graph.state import ResearchState
 
 # 构建图 (Graph Construction)
 def create_graph():
@@ -85,5 +85,5 @@ def create_graph():
     memory = SqliteSaver(conn)
 
     # 编译图
-    app = workflow.compile(checkpointer=memory, interrupt_before=["planner"])
+    app = workflow.compile(checkpointer=memory, interrupt_after=["planner"])
     return app

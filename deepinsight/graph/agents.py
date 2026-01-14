@@ -1,5 +1,8 @@
 import json
+import random
 import re
+import threading
+import time
 from langchain_core.documents import Document
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.output_parsers import JsonOutputParser,StrOutputParser
@@ -7,18 +10,19 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_tavily import TavilySearch
 from langchain_community.tools.tavily_search import TavilySearchResults
 # from langchain_tavily import TavilySearchResults
-from core.llm import get_llm
+from deepinsight.core.llm import get_llm
 import logging
 from concurrent.futures import ThreadPoolExecutor,as_completed
 from deepinsight.tools.vector_store import VectorStore, vector_store
 from deepinsight.utils.summarizer import map_summarize_documents
 from deepinsight.utils.token_utils import count_tokens, term_document
-from tools.base import get_tools
-from graph.state import ResearchState
+from deepinsight.tools.base import get_tools
+from deepinsight.graph.state import ResearchState
 from deepinsight.utils.normalizers import normalize_data
 from deepinsight.prompts.prompt_demo import CHAT_PROMPT, PLANNER_PROMPT, REACHER_PROMPT, ROUTER_PROMPT,WRITER_PROMPT,REVIEVER_PROMPT
 
 logger = logging.getLogger(__name__)
+api_semaphore = threading.Semaphore(3)
 vector_store = VectorStore()
 
 def router_node(state: ResearchState):
@@ -122,6 +126,24 @@ def orchestrator_node(state: ResearchState):
     else:
         return {"next": "writer"}
 
+def rate_limited_call(func, *args, **kwargs):
+    """
+    包装器：速率限制+重试逻辑
+    """
+    max_retries = 3
+    for attempt in range(max_retries):
+        with api_semaphore:
+            try:
+                # 随机抖动
+                time.sleep(random.uniform(0.5, 1.5))
+                return func(*args, **kwargs)
+            except Exception as e:
+                if '429' in str(e) and attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 5
+                    logger.warning(f"API调用失败，尝试重试 {attempt+1}/{max_retries} 次: {e}")
+                    time.sleep(wait_time)
+                    continue
+                raise e
 def research_node(state: ResearchState):
     '''
     并行研究节点,负责当前索引子任务
@@ -154,7 +176,7 @@ def research_node(state: ResearchState):
         query = task_info.get("description", "")
         try:
             tavily_tool = TavilySearch(max_results=5)
-            res = tavily_tool.invoke({"query": query})
+            res = rate_limited_call(tavily_tool.invoke, {"query": query})
             raw_results = res.get("results", [])
 
             new_docs = normalize_data(raw_results, query)
@@ -177,7 +199,7 @@ def research_node(state: ResearchState):
                 prompt = REACHER_PROMPT.format(query=query, context_text=context_text)
 
                 try:
-                    response = llm.invoke(prompt)
+                    response = rate_limited_call(llm.invoke, prompt)
                     step_summary = response.content
                     print(f"---[Researcher]子任务总结: {step_summary}---")
                 except Exception as e:
@@ -236,8 +258,19 @@ def research_node(state: ResearchState):
             plan[idx]["result"] = f"任务失败: {res.get('error')}"
             print(f"---[Researcher]子任务失败: {plan[idx]['description'][:50]}---")
 
+    final_docs_for_state = []
+    MAX_FULL_TEXT_DOCS = 5
+    if len(all_new_docs) > MAX_FULL_TEXT_DOCS:
+        print(f"---[Researcher]文档数量{len(all_new_docs)}，进行截断---")
+        for d in all_new_docs:
+            light_doc = d.copy()
+            light_doc["text"] = d.get("text","")[:500]  # 截断正文
+            final_docs_for_state.append(light_doc)
+    else:
+        final_docs_for_state = all_new_docs
+
     return {
-        "documents": all_new_docs,
+        "documents": final_docs_for_state,
         "current_step_index": len(plan),
         "plan": plan,
         "bg_investigation": all_raw_results
@@ -276,10 +309,20 @@ def writer_node(state: ResearchState):
     seen_ids = set()    # 去重ID
     rag_success = False
 
-    doc_map = {doc.get("id"): doc for doc in documents if doc.get("id")}
+    all_step_ids = []
     for step in plan:
-        step_ids = step.get("doc_ids", [])
-        for doc_id in step_ids:
+        all_step_ids.extend(step.get("doc_ids", []))
+
+    if all_step_ids:
+        full_docs = vector_store.get_documents_by_ids(all_step_ids)
+        for doc in full_docs:
+            if doc.get("id") not in seen_ids:
+                retrieved_docs.append(doc)
+                seen_ids.add(doc.get("id"))
+
+    if not retrieved_docs:
+        doc_map = {doc.get("id"): doc for doc in documents if doc.get("id")}
+        for doc_id in all_step_ids:
             if doc_id in doc_map and doc_id not in seen_ids:
                 retrieved_docs.append(doc_map[doc_id])
                 seen_ids.add(doc_id)
@@ -345,7 +388,8 @@ def writer_node(state: ResearchState):
             "id":seg.get("id"),
             "title": seg.get("title"),
             "url": seg.get("url"),
-            "snippet": seg.get("text")[:300]
+            "snippet": seg.get("text")[:300],
+            "full_text": seg.get("text")    # 可选(作为前端展示书写过程)
         })
     
     docs_context = "\n\n".join([
