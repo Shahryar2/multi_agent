@@ -88,11 +88,40 @@ async def stream_research(thread_id: str):
                 
                 for node_name, node_state in event.items():
                     print(f"--- [API] Node Executed: {node_name} ---")
+                    
+                    # Extract draft/citations if available
+                    draft = current_snapshot.values.get("draft")
+                    citations = current_snapshot.values.get("citations")
+                    # Try to get chat response if it exists (chat node returns string usually, but state has no 'response' key, let's check agents.py)
+                    # agents.py chat_node returns string direct to output, but StateGraph outputs are updates.
+                    # If chat_node returns {"messages": ...} or similar.
+                    # In agents.py currently: chat_node returns string? No, it returns last message?
+                    # Let's check agents.py chat_node return value.
+                    # It returns StrOutputParser output. 
+                    # StateGraph expects a dict to update state. 
+                    # If chat_node returns string, it might crash if state key not found?
+                    # The state has 'task'. 
+                    # We need to ensure chat_node returns a compatible dict like {"task": ...} or we handle it.
+                    # Wait, agents.py chat_node invokes chain which returns string.
+                    # We should probably fix chat_node to return a dict if it hasn't been fixed.
+                    
+                    # payload construction
                     payload = {
                         "node": node_name,
                         "plan": global_plan,
-                        "step_index": current_snapshot.values.get("current_step_index", 0)
+                        "step_index": current_snapshot.values.get("current_step_index", 0),
+                        "draft": draft,
+                        "citations": citations
                     }
+                    
+                    # Check for chat node special case (result might be in the event itself if it's not a state user key)
+                    if node_name == "chat":
+                        # If the node output is the message text
+                        if isinstance(node_state, str):
+                             payload["response"] = node_state
+                        elif isinstance(node_state, dict) and "response" in node_state:
+                             payload["response"] = node_state["response"]
+                    
                     yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
                     # 防止前端过载
                     await asyncio.sleep(0.05)

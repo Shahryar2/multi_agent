@@ -27,3 +27,4 @@ class ResearchState(TypedDict):
     next: str
     bg_investigation: Annotated[List[Dict[str, Any]], operator.add]
     review: Dict[str, Any]
+    response: str # 用于存储聊天回复

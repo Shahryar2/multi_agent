@@ -539,3 +539,4 @@ def chat_node(state: ResearchState):
     
     logger.info(f"聊天响应：{response}")
     print(f"聊天响应：{response}")
+    return {"response": response}
