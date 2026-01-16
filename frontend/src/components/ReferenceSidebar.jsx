@@ -13,47 +13,47 @@ export function ReferenceSidebar({ sources, logs = [], onClear }) {
   }, [logs, activeTab]);
 
   return (
-    <div className="hidden h-screen w-80 flex-col border-r border-gray-200 bg-gray-50 md:flex">
+    <div className="hidden h-full w-80 flex-col border-l border-white/10 bg-[#161616] md:flex shrink-0">
       {/* Header / Tabs */}
-      <div className="flex h-14 items-center border-b border-gray-200 bg-white">
+      <div className="flex h-14 items-center border-b border-white/10 bg-[#161616] shrink-0">
         <button
             onClick={() => setActiveTab('sources')}
             className={`flex-1 flex items-center justify-center gap-2 h-full text-sm font-medium transition-colors relative ${
-                activeTab === 'sources' ? 'text-blue-600 bg-blue-50/50' : 'text-gray-500 hover:bg-gray-50'
+                activeTab === 'sources' ? 'text-blue-400 bg-white/5' : 'text-gray-500 hover:bg-white/5 hover:text-gray-300'
             }`}
         >
             <BookOpen size={16} />
             <span>资料库 ({sources.length})</span>
             {activeTab === 'sources' && (
-                <div className="absolute bottom-0 left-0 w-full h-0.5 bg-blue-600" />
+                <div className="absolute bottom-0 left-0 w-full h-0.5 bg-blue-500" />
             )}
         </button>
-        <div className="w-px h-6 bg-gray-200" />
+        <div className="w-px h-6 bg-white/10" />
         <button
             onClick={() => setActiveTab('logs')}
             className={`flex-1 flex items-center justify-center gap-2 h-full text-sm font-medium transition-colors relative ${
-                activeTab === 'logs' ? 'text-amber-600 bg-amber-50/50' : 'text-gray-500 hover:bg-gray-50'
+                activeTab === 'logs' ? 'text-amber-400 bg-white/5' : 'text-gray-500 hover:bg-white/5 hover:text-gray-300'
             }`}
         >
             <Activity size={16} />
             <span>执行日志</span>
              {activeTab === 'logs' && (
-                <div className="absolute bottom-0 left-0 w-full h-0.5 bg-amber-600" />
+                <div className="absolute bottom-0 left-0 w-full h-0.5 bg-amber-500" />
             )}
         </button>
       </div>
 
       {/* Content Area */}
-      <div className="flex-1 overflow-y-auto bg-gray-50">
+      <div className="flex-1 overflow-y-auto bg-[#161616] custom-scrollbar">
         
         {/* Sources Tab */}
         {activeTab === 'sources' && (
             <div className="p-4 space-y-3">
                 {sources.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-20 text-center text-gray-400">
+                <div className="flex flex-col items-center justify-center py-20 text-center text-gray-500">
                     <FileText size={48} className="mb-4 opacity-20" />
                     <p className="text-sm">暂无引用文档</p>
-                    <p className="text-xs mt-1">开始研究后，相关资料将出现在这里</p>
+                    <p className="text-xs mt-1 text-gray-600">开始研究后，相关资料将出现在这里</p>
                 </div>
                 ) : (
                 sources.map((src, idx) => (
@@ -67,19 +67,19 @@ export function ReferenceSidebar({ sources, logs = [], onClear }) {
         {activeTab === 'logs' && (
             <div className="p-0 font-mono text-xs">
                 {logs.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center py-20 text-center text-gray-400">
+                    <div className="flex flex-col items-center justify-center py-20 text-center text-gray-500">
                         <Terminal size={48} className="mb-4 opacity-20" />
                         <p className="text-sm">系统准备就绪</p>
-                        <p className="text-xs mt-1">等待任务指令...</p>
+                        <p className="text-xs mt-1 text-gray-600">等待任务指令...</p>
                     </div>
                 ) : (
-                    <div className="divide-y divide-gray-100 bg-white">
+                    <div className="divide-y divide-white/5 bg-[#161616]">
                         {logs.map((log, i) => (
-                            <div key={i} className="px-4 py-3 hover:bg-gray-50 flex gap-2 sm:gap-3">
-                                <span className="text-gray-300 select-none text-[10px] w-6 text-right shrink-0 pt-0.5">
+                            <div key={i} className="px-4 py-3 hover:bg-white/5 flex gap-2 sm:gap-3 transition-colors">
+                                <span className="text-gray-600 select-none text-[10px] w-6 text-right shrink-0 pt-0.5">
                                     {i + 1}
                                 </span>
-                                <div className="flex-1 break-words text-gray-700">
+                                <div className="flex-1 break-words text-gray-400">
                                     {log}
                                 </div>
                             </div>
@@ -93,10 +93,10 @@ export function ReferenceSidebar({ sources, logs = [], onClear }) {
 
       {/* Footer / Actions */}
       {onClear && (
-        <div className="border-t border-gray-200 p-3 bg-white">
+        <div className="border-t border-white/10 p-3 bg-[#161616]">
             <button 
               onClick={onClear}
-              className="flex w-full items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-gray-900"
+              className="flex w-full items-center justify-center gap-2 rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-gray-400 transition-colors hover:bg-white/10 hover:text-white hover:border-white/20"
             >
                <PlusCircle size={16} />
                <span>开启新研究</span>

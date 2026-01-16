@@ -136,7 +136,16 @@ def planner_node(state: ResearchState):
         plan = parser.parse(response.content)
 
         if not isinstance(plan,list):
-            plan = [plan]
+            # 兼容 LLM 返回 {"steps": [...]} 或 {"plan": [...]} 的情况
+            if isinstance(plan, dict):
+                if "steps" in plan and isinstance(plan["steps"], list):
+                    plan = plan["steps"]
+                elif "plan" in plan and isinstance(plan["plan"], list):
+                    plan = plan["plan"]
+                else:
+                    plan = [plan]
+            else:
+                plan = [plan]
 
         for step in plan:
             if "status" not in step:
@@ -296,11 +305,14 @@ def research_node(state: ResearchState):
 
             all_new_docs.extend(res.get("docs",[]))
             all_raw_results.extend(res.get("raw_results",[]))
-            print(f"---[Researcher]子任务完成: {plan[idx]['description'][:50]}---")
+            # Safely get description to prevent KeyError
+            desc = plan[idx].get('description', 'Unknown Task')
+            print(f"---[Researcher]子任务完成: {desc[:50]}---")
         else:
             plan[idx]["status"] = "failed"
             plan[idx]["result"] = f"任务失败: {res.get('error')}"
-            print(f"---[Researcher]子任务失败: {plan[idx]['description'][:50]}---")
+            desc = plan[idx].get('description', 'Unknown Task')
+            print(f"---[Researcher]子任务失败: {desc[:50]}---")
 
     final_docs_for_state = []
     MAX_FULL_TEXT_DOCS = 5
@@ -448,23 +460,21 @@ def writer_node(state: ResearchState):
     messages = [
         HumanMessage(content=f"你是一个专业的研报撰写专家。\n\n{full_prompt}")
     ]
-    stream = llm.stream(messages)
-    # 流式生成器
-    def stream_generator():
-        final_draft_content = ""
-        for chunk in stream:
-            content_piece = chunk.content
-            if content_piece:
-                final_draft_content += content_piece
-                citations_footer = "\n\n## 引用列表\n" + "\n".join(
-                f"[{c['index']}] {c['title']} — {c['url']}" for c in citations
-            )
-            yield {"draft":final_draft_content + citations_footer,"citations":citations}
-        
-        # 确认完整
-        yield {"draft":final_draft_content + citations_footer,"citations": citations}
     
-    return stream_generator()
+    # Use invoke instead of stream to return the final string for state update
+    # The server will handle streaming via astream_events or separate callback if needed
+    try:
+        response = llm.invoke(messages)
+        final_draft = response.content
+        
+        # Append citations
+        citations_footer = "\n\n## 引用列表\n" + "\n".join(
+            f"[{c['index']}] {c['title']} — {c['url']}" for c in citations
+        )
+        return {"draft": final_draft + citations_footer, "citations": citations}
+    except Exception as e:
+        logger.error(f"Writer LLM failed: {e}")
+        return {"draft": "生成报告失败。", "citations": []}
     
 def verifier_node(state: ResearchState):
     """
@@ -549,7 +559,7 @@ def chat_node(state: ResearchState):
     聊天节点
     """
     task = state["task"]
-    llm = get_llm()
+    llm = get_llm(model_tag="basic")
 
     # Combine messages
     prompt = ChatPromptTemplate.from_messages([

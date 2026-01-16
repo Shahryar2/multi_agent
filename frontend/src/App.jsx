@@ -1,11 +1,11 @@
-// src/App.jsx
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, LogIn, UserCircle } from 'lucide-react';
-import { ChatBubble } from './components/ChatBubble';
+import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { Send, LogIn, UserCircle, Bot, Activity, Clock, Search, ChevronRight, Loader2 } from 'lucide-react';
 import { ReferenceSidebar } from './components/ReferenceSidebar';
 import { ApprovalModal } from './components/ApprovalModal';
 import { LoginModal } from './components/LoginModal';
-import { startTask, approvePlan, login, syncHistory, getHistory, API_BASE } from './lib/api';
+import { startTask, approvePlan, syncHistory, getHistory, API_BASE } from './lib/api';
 
 function App() {
   const [user, setUser] = useState(() => {
@@ -14,12 +14,10 @@ function App() {
   });
   const [showLogin, setShowLogin] = useState(false);
   
-  // Load initial state from localStorage if available
+  // Load initial state
   const [messages, setMessages] = useState(() => {
     const saved = localStorage.getItem('di_messages');
-    return saved ? JSON.parse(saved) : [
-      { role: 'assistant', content: '👋 你好！我是 DeepInsight 全栈研究助手。请告诉我你想研究的主题。' }
-    ];
+    return saved ? JSON.parse(saved) : [];
   });
   
   const [input, setInput] = useState('');
@@ -40,48 +38,22 @@ function App() {
   useEffect(() => {
     if(activeThreadId) localStorage.setItem('di_thread_id', activeThreadId);
     // Sync to server if user logged in
-    if (user && activeThreadId && messages.length > 1) {
+    if (user && activeThreadId && messages.length > 0) {
         const timeout = setTimeout(() => {
             syncHistory(user.id, activeThreadId, messages).catch(console.error);
-        }, 2000); // Debounce
+        }, 3000);
         return () => clearTimeout(timeout);
     }
   }, [activeThreadId, messages, user]);
 
-  // Load history on login
-  const handleLoginSuccess = async (userData) => {
-    setUser(userData);
-    localStorage.setItem('di_user', JSON.stringify(userData));
-    setShowLogin(false);
-    addLog(`Logged in as ${userData.username}`);
-    // Load latest history if strictly needed, or just keep current session
-    // For now, let's merge or load? Let's just keep current but enable sync.
-    // If current is empty, load from server?
-    if (messages.length <= 1) {
-        try {
-            const histories = await getHistory(userData.id);
-            if (histories.length > 0) {
-                const latest = histories[0];
-                setMessages(latest.messages);
-                setActiveThreadId(latest.thread_id);
-                addLog("Restored history from cloud.");
-            }
-        } catch (e) {
-            console.error("Failed to load history", e);
-        }
-    }
-  };
-
-  const handleLogout = () => {
-    setUser(null);
-    localStorage.removeItem('di_user');
-    addLog("Logged out.");
-  };
-
-  const messagesEndRef = useRef(null);
+  const reportContainerRef = useRef(null);
 
   // Auto-scroll
-  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+  useEffect(() => { 
+      if (reportContainerRef.current) {
+         reportContainerRef.current.scrollTop = reportContainerRef.current.scrollHeight;
+      }
+  }, [messages]);
 
   const addLog = (msg) => {
     const time = new Date().toLocaleTimeString([], { hour12: false });
@@ -90,7 +62,7 @@ function App() {
 
   // Clear Chat Function
   const clearChat = () => {
-    setMessages([{ role: 'assistant', content: '👋 你好！我是 DeepInsight 全栈研究助手。请告诉我你想研究的主题。' }]);
+    setMessages([]);
     setSources([]);
     setLogs([]);
     setPendingPlan([]);
@@ -102,9 +74,17 @@ function App() {
   const handleSend = async () => {
     if (!input.trim() || isLoading) return;
     
+    // Clear previous if starting new
+    if (messages.length > 0 && !isLoading) {
+       clearChat(); 
+       // small delay to allow state clear
+       await new Promise(r => setTimeout(r, 0));
+    }
+
     const query = input;
     setInput('');
-    setMessages(prev => [...prev, { role: 'user', content: query }]);
+    // Initial user message
+    setMessages([{ role: 'user', content: query }]);
     setIsLoading(true);
     addLog(`Starting task: ${query.substring(0, 20)}...`);
 
@@ -120,24 +100,11 @@ function App() {
 
   const connectStream = (threadId) => {
     const eventSource = new EventSource(`${API_BASE}/research/${threadId}/stream`);
+    // Store eventSource in a ref if I wanted to stop it, or just use a state/callback.
+    // For now, let's keep it simple. But to implement stop, we need a ref.
+    window.currentEventSource = eventSource;
     
-    // Placeholder message for streaming content
-    setMessages(prev => [...prev, { role: 'assistant', content: '', isStreaming: true }]);
-
     eventSource.onmessage = (event) => {
-      if (event.data === "[DONE]") {
-        eventSource.close();
-        setIsLoading(false);
-        setMessages(prev => {
-           const newParams = [...prev];
-           const last = newParams[newParams.length-1];
-           if(last.isStreaming) last.isStreaming = false;
-           return newParams;
-        });
-        addLog("Stream ended.");
-        return;
-      }
-
       try {
         const data = JSON.parse(event.data);
         
@@ -155,22 +122,50 @@ function App() {
           addLog(`Node Executed: ${data.node}`);
         }
 
-        // Content Update (Draft or Response)
-        const text = data.draft || data.response;
-        if (text) {
-          setMessages(prev => {
-            const next = [...prev];
-            const lastMsg = next[next.length - 1];
-            if (lastMsg.role === 'assistant') {
-              lastMsg.content = text;
-            }
-            return next;
-          });
+        // Streaming Content (Delta)
+        if (data.delta) {
+             setMessages(prev => {
+                const last = prev[prev.length - 1];
+                if (last && last.role === 'assistant') {
+                    // Start streaming flag if not set
+                    const isStreaming = true; 
+                    return [...prev.slice(0, -1), { ...last, content: last.content + data.delta, isStreaming }];
+                } else {
+                    return [...prev, { role: 'assistant', content: data.delta, isStreaming: true }];
+                }
+             });
+        }
+
+        // Full Content Replace (Legacy/Draft)
+        if (data.draft) {
+             setMessages(prev => {
+                // Find if we already have an assistant "draft" message
+                const last = prev[prev.length - 1];
+                if (last && last.role === 'assistant') {
+                    // Update existing
+                    const next = [...prev];
+                    next[next.length - 1] = { ...last, content: data.draft };
+                    return next;
+                } else {
+                    // Add new
+                    return [...prev, { role: 'assistant', content: data.draft }];
+                }
+             });
+        } else if (data.response) {
+            // Chat response
+            setMessages(prev => [...prev, { role: 'assistant', content: data.response }]);
         }
 
         // Citations
         if (data.citations) {
           setSources(data.citations);
+        }
+
+        // Completed
+        if (data.node === 'workflow_completed') {
+            eventSource.close();
+            setIsLoading(false);
+            addLog("Task completed.");
         }
 
       } catch (e) {
@@ -186,16 +181,20 @@ function App() {
     };
   };
 
+  const handleStop = () => {
+    if (window.currentEventSource) {
+        window.currentEventSource.close();
+        window.currentEventSource = null;
+        setIsLoading(false);
+        addLog("Task stopped by user.");
+    }
+  };
+
   const handleApprove = async () => {
     setIsApprovalOpen(false);
     addLog("Plan approved. Resuming...");
-    
-    // Optimistic UI
-    setMessages(prev => [...prev, { role: 'assistant', content: '✅ 计划已确认，正在继续执行...', isStreaming: true }]);
-    
     try {
       await approvePlan(activeThreadId, pendingPlan);
-      // Reconnect stream to continue
       connectStream(activeThreadId);
     } catch (err) {
       console.error(err);
@@ -204,76 +203,198 @@ function App() {
     }
   };
 
+  const handleLoginSuccess = async (userData) => {
+    setUser(userData);
+    localStorage.setItem('di_user', JSON.stringify(userData));
+    setShowLogin(false);
+    addLog(`Logged in as ${userData.username}`);
+  };
+
+  const handleLogout = () => {
+    setUser(null);
+    localStorage.removeItem('di_user');
+    addLog("Logged out.");
+  };
+
+  // Get current report content
+  const currentReport = messages.findLast(m => m.role === 'assistant')?.content || '';
+  const currentUserQuery = messages.find(m => m.role === 'user')?.content || '';
+
   return (
-    <div className="flex h-screen overflow-hidden bg-white font-sans antialiased text-gray-900">
-      <ReferenceSidebar sources={sources} logs={logs} onClear={clearChat} />
+    <div className="flex h-screen overflow-hidden bg-[#111111] font-sans antialiased text-gray-100">
+      
+      {/* Main Content Area */}
+      <div className="flex flex-1 flex-col min-w-0">
+         {/* Navbar */}
+         <header className="flex h-16 items-center justify-between border-b border-white/10 bg-[#111111] px-6 shrink-0 z-10">
+            <div className="flex items-center gap-3">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-600 text-white font-bold text-lg shadow-lg shadow-blue-900/20">
+                    DI
+                </div>
+                <span className="font-semibold text-lg tracking-tight text-white">DeepInsight <span className="text-blue-500 text-xs align-top">PRO</span></span>
+            </div>
+            
+            <div className="flex items-center gap-4">
+                 {user ? (
+                     <div className="flex items-center gap-3 pl-4 border-l border-white/10">
+                        <div className="text-right hidden sm:block">
+                            <div className="text-xs text-gray-400">Welcome back</div>
+                            <div className="text-sm font-medium text-white">{user.username}</div>
+                        </div>
+                        <button onClick={handleLogout} className="p-2 hover:bg-white/5 rounded-full text-gray-400 hover:text-white transition-colors">
+                            <UserCircle size={20} />
+                        </button>
+                     </div>
+                 ) : (
+                    <button 
+                      onClick={() => setShowLogin(true)}
+                      className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-1.5 text-sm font-medium text-white transition-all hover:bg-white/10 hover:border-white/20"
+                    >
+                        <LogIn size={14} /> 
+                        <span>Sign In</span>
+                    </button>
+                 )}
+            </div>
+         </header>
 
-      <main className="flex flex-1 flex-col relative min-w-0">
-        {/* Header */}
-        <header className="flex h-14 items-center justify-between border-b border-gray-100 px-6 bg-white shrink-0">
-          <div className="flex items-center gap-2 font-bold text-gray-800">
-            <span className="text-xl">🦁</span>
-            <span>DeepInsight Pro</span>
-          </div>
-          <div className="flex items-center gap-4">
-             <div className="text-xs text-gray-400">Powered by LangGraph</div>
-             {user ? (
-                 <div className="flex items-center gap-2 text-sm text-gray-600">
-                    <UserCircle size={16} />
-                    <span>{user.username}</span>
-                    <button onClick={handleLogout} className="text-xs text-red-400 hover:text-red-600 ml-1">退出</button>
-                 </div>
-             ) : (
-                <button 
-                  onClick={() => setShowLogin(true)}
-                  className="flex items-center gap-1 text-sm font-medium text-blue-600 hover:text-blue-700"
-                >
-                    <LogIn size={14} /> 登录 / 注册
-                </button>
-             )}
-          </div>
-        </header>
+         <main className="flex flex-1 overflow-hidden relative">
+            
+            {/* Center Stage: Report Generation / Output */}
+            <div className="flex-1 flex flex-col relative overflow-hidden">
+                
+                {/* 1. Empty State / Hero Input */}
+                {messages.length === 0 ? (
+                    <div className="flex-1 flex flex-col items-center justify-center p-4 sm:p-8 animate-in fade-in duration-500">
+                        <div className="w-full max-w-2xl text-center space-y-8">
+                             <div className="space-y-4">
+                                <h1 className="text-4xl sm:text-5xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent pb-2">
+                                    What do you want to research?
+                                </h1>
+                                <p className="text-lg text-gray-400 max-w-lg mx-auto">
+                                    DeepInsight aggregates information from real-time web agents to generate comprehensive reports.
+                                </p>
+                             </div>
 
-        {/* Chat Area */}
-        <div className="flex-1 overflow-y-auto bg-gray-50/50 p-4 pb-24">
-          <div className="mx-auto max-w-3xl space-y-6">
-            {messages.map((msg, idx) => (
-              <ChatBubble 
-                key={idx} 
-                role={msg.role} 
-                content={msg.content} 
-                isLoading={msg.role === 'assistant' && msg.content === '' && isLoading}
-              />
-            ))}
-            <div ref={messagesEndRef} />
-          </div>
-        </div>
+                             <div className="relative group">
+                                <div className="absolute -inset-1 bg-gradient-to-r from-blue-600 via-purple-600 to-blue-600 rounded-2xl opacity-20 group-hover:opacity-40 blur transition duration-500"></div>
+                                <div className="relative flex items-center bg-[#1a1a1a] rounded-xl border border-white/10 p-2 shadow-2xl">
+                                    <Search className="ml-3 text-gray-500" size={20} />
+                                    <input 
+                                        type="text" 
+                                        value={input}
+                                        onChange={(e) => setInput(e.target.value)}
+                                        onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+                                        placeholder="Analyze the market trend of AI agents..." 
+                                        className="flex-1 bg-transparent border-none px-4 py-3 text-lg text-white focus:outline-none placeholder:text-gray-600"
+                                        autoFocus
+                                    />
+                                    <button 
+                                        onClick={handleSend}
+                                        disabled={!input.trim()}
+                                        className="p-3 rounded-lg bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-50 disabled:hover:bg-blue-600 transition-all shadow-lg shadow-blue-900/20"
+                                    >
+                                        <Send size={20} />
+                                    </button>
+                                </div>
+                             </div>
 
-        {/* Input Area */}
-        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-white via-white to-transparent pt-10 pb-6 px-4">
-          <div className="mx-auto max-w-3xl">
-             <div className="relative flex items-center gap-2 rounded-2xl border border-gray-200 bg-white p-2 shadow-sm ring-1 ring-gray-200 focus-within:ring-2 focus-within:ring-blue-500">
-                <input
-                  type="text"
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                  placeholder="输入研究课题..."
-                  disabled={isLoading}
-                  className="flex-1 border-none bg-transparent px-4 py-2 text-sm focus:outline-none disabled:opacity-50"
-                  autoFocus
-                />
-                <button 
-                  onClick={handleSend}
-                  disabled={isLoading || !input.trim()}
-                  className="flex h-8 w-8 items-center justify-center rounded-xl bg-blue-600 text-white transition-all hover:bg-blue-700 disabled:opacity-50 disabled:bg-gray-300"
-                >
-                  <Send size={16} />
-                </button>
-             </div>
-          </div>
-        </div>
-      </main>
+                             {/* Suggestions */}
+                             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-8 text-left">
+                                {[
+                                    "Is DeepSeek V3 open source?", 
+                                    "Comparison of React vs Vue in 2025", 
+                                    "SpaceX Starship latest launch details"
+                                ].map((q, i) => (
+                                    <button 
+                                        key={i}
+                                        onClick={() => { setInput(q); }}
+                                        className="p-4 rounded-xl border border-white/5 bg-white/5 hover:bg-white/10 hover:border-white/10 transition-all text-sm text-gray-400 hover:text-white group"
+                                    >
+                                        <span className="line-clamp-2">{q}</span>
+                                        <ChevronRight size={14} className="mt-2 text-blue-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                                    </button>
+                                ))}
+                             </div>
+                        </div>
+                    </div>
+                ) : (
+                    // 2. Active Session Layout
+                    <div className="flex-1 flex flex-col h-full bg-[#111111]">
+                        {/* Status Bar */}
+                        <div className="h-14 border-b border-white/5 flex items-center justify-between px-6 bg-[#161616]">
+                            <div className="flex items-center gap-3">
+                                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/5 border border-white/10 text-blue-400">
+                                    <Activity size={16} />
+                                </div>
+                                <div>
+                                    <div className="text-xs text-gray-500 uppercase font-medium tracking-wider">Researching</div>
+                                    <div className="text-sm text-white font-medium max-w-md truncate">{currentUserQuery}</div>
+                                </div>
+                            </div>
+                            
+                            {/* Steps / Progress placeholder if we had structured steps */}
+                            {isLoading && (
+                                <div className="flex items-center gap-3">
+                                   <div className="flex items-center gap-2 text-xs text-blue-400 bg-blue-500/10 px-3 py-1.5 rounded-full animate-pulse">
+                                       <Clock size={12} />
+                                       <span>Processing...</span>
+                                   </div>
+                                   <button 
+                                     onClick={handleStop}
+                                     className="text-xs text-red-400 hover:text-white px-3 py-1.5 border border-red-500/30 rounded-lg hover:bg-red-500/20 transition-colors"
+                                   >
+                                     Stop
+                                   </button>
+                                </div>
+                            )}
+
+                            <div className="flex items-center gap-2">
+                                <button 
+                                    onClick={clearChat}
+                                    className="text-xs text-gray-500 hover:text-white px-3 py-1.5 rounded-lg hover:bg-white/5 transition-colors"
+                                >
+                                    New Search
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Split View Content */}
+                        <div className="flex-1 overflow-hidden flex flex-col md:flex-row">
+                             {/* Report Area */}
+                             <div 
+                                className="flex-1 overflow-y-auto custom-scrollbar p-6 md:p-8 lg:p-12" 
+                                ref={reportContainerRef}
+                             >
+                                <div className="max-w-3xl mx-auto">
+                                    {currentReport ? (
+                                        <div className="animate-in fade-in slide-in-from-bottom-4 duration-700">
+                                            <div className="markdown-body">
+                                                <Markdown remarkPlugins={[remarkGfm]}>{currentReport}</Markdown>
+                                            </div>
+                                            {isLoading && (
+                                                <div className="mt-4 flex items-center gap-2 text-gray-500 animate-pulse">
+                                                    <div className="h-2 w-2 rounded-full bg-blue-500"></div>
+                                                    <span className="text-xs">Generating content...</span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        <div className="h-full flex flex-col items-center justify-center text-gray-500 gap-4 opacity-50">
+                                            <Loader2WithOrbit />
+                                            <p className="text-sm font-mono">Initializing Research Agent...</p>
+                                        </div>
+                                    )}
+                                </div>
+                             </div>
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            {/* Right Sidebar: Sources & Logs (Hidden on mobile, only visible when input is active) */}
+            {messages.length > 0 && <ReferenceSidebar sources={sources} logs={logs} />}
+         </main>
+      </div>
 
       <ApprovalModal 
         isOpen={isApprovalOpen} 
@@ -288,6 +409,17 @@ function App() {
       />
     </div>
   );
+}
+
+// Custom Loader just for visual flair
+function Loader2WithOrbit() {
+    return (
+        <div className="relative flex items-center justify-center h-12 w-12">
+            <div className="absolute inset-0 rounded-full border-2 border-blue-500/20"></div>
+            <div className="absolute inset-0 rounded-full border-t-2 border-blue-500 animate-spin"></div>
+            <Bot size={20} className="text-blue-500" />
+        </div>
+    );
 }
 
 export default App;
