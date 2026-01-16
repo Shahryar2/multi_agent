@@ -19,7 +19,7 @@ from deepinsight.utils.token_utils import count_tokens, term_document
 from deepinsight.tools.base import get_tools
 from deepinsight.graph.state import ResearchState
 from deepinsight.utils.normalizers import normalize_data
-from deepinsight.prompts.prompt_demo import CHAT_PROMPT, PLANNER_PROMPT, REACHER_PROMPT, ROUTER_PROMPT,WRITER_PROMPT,REVIEVER_PROMPT
+from deepinsight.prompts.prompt_demo import CHAT_PROMPT, PLANNER_PROMPT, REACHER_PROMPT, ROUTER_PROMPT,WRITER_PROMPT,REVIEVER_PROMPT, STYLE_ANALYZER_PROMPT
 
 logger = logging.getLogger(__name__)
 api_semaphore = threading.Semaphore(3)
@@ -48,24 +48,36 @@ def router_node(state: ResearchState):
     try:
         category = chain.invoke({"task": task})
         logger.info(f"Router category: {category}")
+        
+        # Analyze style
+        style_prompt = ChatPromptTemplate.from_messages([
+            ("user", f"{STYLE_ANALYZER_PROMPT}\n\n用户输入: {{task}}")
+        ])
+        style_chain = style_prompt | llm | StrOutputParser()
+        style = style_chain.invoke({"task": task}).strip().strip('"').lower()
+        if style not in ["casual", "story"]:
+            style = "professional"
+        logger.info(f"Router detected style: {style}")
+
     except Exception as e:
         logger.error(f"Router LLM failed: {e}")
         # Default fallback
         category = "report"
+        style = "professional"
 
     # Normalize category
     category = category.strip().strip('"').lower()
 
     if "report" in category:
-        return {"next": "planner", "catagory": "report"}
+        return {"next": "planner", "catagory": "report", "style": style}
     if "search" in category:
         # Fallback search to planner for now as simple_researcher is not wired
-        return {"next": "planner", "catagory": "report"}
+        return {"next": "planner", "catagory": "report", "style": style}
     if "chat" in category:
-        return {"next": "chat", "catagory": "chat"}
+        return {"next": "chat", "catagory": "chat", "style": style}
     
     # Default to planner
-    return {"next": "planner", "catagory": "report"}
+    return {"next": "planner", "catagory": "report", "style": style}
 
 def planner_node(state: ResearchState):
     """
@@ -200,8 +212,10 @@ def research_node(state: ResearchState):
         print(f"---[Researcher]无待处理子任务，跳过---")
         return {"current_step_index": len(plan)}
     
+    main_task = state.get("task","")
     def execute_single_task(task_info):
-        query = task_info.get("description", "")
+        sub_task_description = task_info.get("description","")
+        query = f'{main_task} - {sub_task_description}'
         try:
             tavily_tool = TavilySearch(max_results=5)
             res = rate_limited_call(tavily_tool.invoke, {"query": query})
@@ -325,6 +339,7 @@ def writer_node(state: ResearchState):
     }
     """
     task = state["task"]
+    style = state.get("style", "professional")  # Get style
     plan = state.get("plan",[])
     documents = state.get("documents", [])
     llm = get_llm(model_tag="smart")
@@ -427,23 +442,30 @@ def writer_node(state: ResearchState):
         for i, seg in enumerate(retrieved_docs)
     ])
 
-    full_prompt = WRITER_PROMPT.format(task=task, plan_context=plan_context, docs_context=docs_context)
+    full_prompt = WRITER_PROMPT.format(task=task, style=style, plan_context=plan_context, docs_context=docs_context)
     
     # Combine messages for compatibility
     messages = [
         HumanMessage(content=f"你是一个专业的研报撰写专家。\n\n{full_prompt}")
     ]
-    draft = llm.invoke(messages)
-    content = draft.content
-
-    citations_footer = "\n\n## 引用列表\n" + "\n".join(
-        f"[{c['index']}] {c['title']} — {c['url']}" for c in citations
-    )
-    final_draft = content + citations_footer
+    stream = llm.stream(messages)
+    # 流式生成器
+    def stream_generator():
+        final_draft_content = ""
+        for chunk in stream:
+            content_piece = chunk.content
+            if content_piece:
+                final_draft_content += content_piece
+                citations_footer = "\n\n## 引用列表\n" + "\n".join(
+                f"[{c['index']}] {c['title']} — {c['url']}" for c in citations
+            )
+            yield {"draft":final_draft_content + citations_footer,"citations":citations}
+        
+        # 确认完整
+        yield {"draft":final_draft_content + citations_footer,"citations": citations}
     
-    return {"draft": final_draft,"citations": citations}
-
-
+    return stream_generator()
+    
 def verifier_node(state: ResearchState):
     """
     验证节点

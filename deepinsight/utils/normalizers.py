@@ -1,5 +1,6 @@
 import json
 import re
+from urllib.parse import urlparse
 from typing import Any, Dict, List, TypedDict
 import logging
 import uuid
@@ -9,11 +10,24 @@ logger = logging.getLogger(__name__)
 def make_segment(query: str, url: str, title: str, text: str, source: str, extra: Dict[str, Any] = None) -> Dict[str, Any]:
     """生成标准化的 segment dict"""
     clean_texted = clean_text(text)
+
+    # 简单验证 URL
+    valid_url = ""
+    if url and isinstance(url, str):
+        url = url.strip()
+        try:
+            parsed = urlparse(url)
+            # 必须包含 scheme (http/https) 和 netloc
+            if parsed.scheme in ('http', 'https') and parsed.netloc:
+                valid_url = url
+        except Exception:
+            pass
+
     return {
         "id": str(uuid.uuid4())[:8],
         "source": source,
         "query": query,
-        "url": url or "",
+        "url": valid_url,
         "title": title or "",
         "text": clean_texted,
         "metadata": extra or {}

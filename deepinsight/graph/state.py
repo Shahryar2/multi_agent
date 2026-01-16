@@ -17,6 +17,7 @@ class ResearchState(TypedDict):
     """
     task: str
     catagory: str # 任务场景
+    style: str # 写作风格
     plan: List[SubTask]
     current_step_index: int
     documents: Annotated[List[Dict[str, Any]], operator.add]

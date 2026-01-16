@@ -1,35 +1,102 @@
 // src/App.jsx
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Terminal } from 'lucide-react';
+import { Send, LogIn, UserCircle } from 'lucide-react';
 import { ChatBubble } from './components/ChatBubble';
 import { ReferenceSidebar } from './components/ReferenceSidebar';
 import { ApprovalModal } from './components/ApprovalModal';
-import { startTask, approvePlan, API_BASE } from './lib/api';
+import { LoginModal } from './components/LoginModal';
+import { startTask, approvePlan, login, syncHistory, getHistory, API_BASE } from './lib/api';
 
 function App() {
-  const [messages, setMessages] = useState([
-    { role: 'assistant', content: '👋 你好！我是 DeepInsight 全栈研究助手。请告诉我你想研究的主题。' }
-  ]);
+  const [user, setUser] = useState(() => {
+    const saved = localStorage.getItem('di_user');
+    return saved ? JSON.parse(saved) : null;
+  });
+  const [showLogin, setShowLogin] = useState(false);
+  
+  // Load initial state from localStorage if available
+  const [messages, setMessages] = useState(() => {
+    const saved = localStorage.getItem('di_messages');
+    return saved ? JSON.parse(saved) : [
+      { role: 'assistant', content: '👋 你好！我是 DeepInsight 全栈研究助手。请告诉我你想研究的主题。' }
+    ];
+  });
+  
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [sources, setSources] = useState([]);
   const [logs, setLogs] = useState([]);
   
+  // Persist messages
+  useEffect(() => {
+    localStorage.setItem('di_messages', JSON.stringify(messages));
+  }, [messages]);
+
   // Approval State
   const [isApprovalOpen, setIsApprovalOpen] = useState(false);
   const [pendingPlan, setPendingPlan] = useState([]);
-  const [activeThreadId, setActiveThreadId] = useState(null);
+  const [activeThreadId, setActiveThreadId] = useState(() => localStorage.getItem('di_thread_id'));
+
+  useEffect(() => {
+    if(activeThreadId) localStorage.setItem('di_thread_id', activeThreadId);
+    // Sync to server if user logged in
+    if (user && activeThreadId && messages.length > 1) {
+        const timeout = setTimeout(() => {
+            syncHistory(user.id, activeThreadId, messages).catch(console.error);
+        }, 2000); // Debounce
+        return () => clearTimeout(timeout);
+    }
+  }, [activeThreadId, messages, user]);
+
+  // Load history on login
+  const handleLoginSuccess = async (userData) => {
+    setUser(userData);
+    localStorage.setItem('di_user', JSON.stringify(userData));
+    setShowLogin(false);
+    addLog(`Logged in as ${userData.username}`);
+    // Load latest history if strictly needed, or just keep current session
+    // For now, let's merge or load? Let's just keep current but enable sync.
+    // If current is empty, load from server?
+    if (messages.length <= 1) {
+        try {
+            const histories = await getHistory(userData.id);
+            if (histories.length > 0) {
+                const latest = histories[0];
+                setMessages(latest.messages);
+                setActiveThreadId(latest.thread_id);
+                addLog("Restored history from cloud.");
+            }
+        } catch (e) {
+            console.error("Failed to load history", e);
+        }
+    }
+  };
+
+  const handleLogout = () => {
+    setUser(null);
+    localStorage.removeItem('di_user');
+    addLog("Logged out.");
+  };
 
   const messagesEndRef = useRef(null);
-  const logsEndRef = useRef(null);
 
   // Auto-scroll
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
-  useEffect(() => { logsEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
 
   const addLog = (msg) => {
     const time = new Date().toLocaleTimeString([], { hour12: false });
     setLogs(prev => [...prev, `[${time}] ${msg}`]);
+  };
+
+  // Clear Chat Function
+  const clearChat = () => {
+    setMessages([{ role: 'assistant', content: '👋 你好！我是 DeepInsight 全栈研究助手。请告诉我你想研究的主题。' }]);
+    setSources([]);
+    setLogs([]);
+    setPendingPlan([]);
+    setActiveThreadId(null);
+    localStorage.removeItem('di_messages');
+    localStorage.removeItem('di_thread_id');
   };
 
   const handleSend = async () => {
@@ -42,7 +109,7 @@ function App() {
     addLog(`Starting task: ${query.substring(0, 20)}...`);
 
     try {
-      const { thread_id } = await startTask(query);
+      const { thread_id } = await startTask(query, user?.id);
       setActiveThreadId(thread_id);
       connectStream(thread_id);
     } catch (err) {
@@ -139,7 +206,7 @@ function App() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-white font-sans antialiased text-gray-900">
-      <ReferenceSidebar sources={sources} />
+      <ReferenceSidebar sources={sources} logs={logs} onClear={clearChat} />
 
       <main className="flex flex-1 flex-col relative min-w-0">
         {/* Header */}
@@ -148,7 +215,23 @@ function App() {
             <span className="text-xl">🦁</span>
             <span>DeepInsight Pro</span>
           </div>
-          <div className="text-xs text-gray-400">Powered by LangGraph</div>
+          <div className="flex items-center gap-4">
+             <div className="text-xs text-gray-400">Powered by LangGraph</div>
+             {user ? (
+                 <div className="flex items-center gap-2 text-sm text-gray-600">
+                    <UserCircle size={16} />
+                    <span>{user.username}</span>
+                    <button onClick={handleLogout} className="text-xs text-red-400 hover:text-red-600 ml-1">退出</button>
+                 </div>
+             ) : (
+                <button 
+                  onClick={() => setShowLogin(true)}
+                  className="flex items-center gap-1 text-sm font-medium text-blue-600 hover:text-blue-700"
+                >
+                    <LogIn size={14} /> 登录 / 注册
+                </button>
+             )}
+          </div>
         </header>
 
         {/* Chat Area */}
@@ -188,19 +271,6 @@ function App() {
                   <Send size={16} />
                 </button>
              </div>
-             
-             {/* Mini Logs */}
-             <div className="mt-2 h-20 overflow-hidden rounded-lg bg-gray-900 p-2 text-[10px] text-gray-400 font-mono opacity-60 hover:opacity-100 transition-opacity">
-                <div className="flex items-center gap-2 mb-1 border-b border-gray-800 pb-1">
-                  <Terminal size={10} /> <span>System Logs</span>
-                </div>
-                <div className="h-full overflow-y-auto pb-4">
-                  {logs.map((log, i) => (
-                    <div key={i} className="truncate">{log}</div>
-                  ))}
-                  <div ref={logsEndRef} />
-                </div>
-             </div>
           </div>
         </div>
       </main>
@@ -209,6 +279,12 @@ function App() {
         isOpen={isApprovalOpen} 
         plan={pendingPlan} 
         onApprove={handleApprove} 
+      />
+      
+      <LoginModal 
+        isOpen={showLogin} 
+        onLoginSuccess={handleLoginSuccess} 
+        onClose={() => setShowLogin(false)} 
       />
     </div>
   );
