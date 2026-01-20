@@ -18,6 +18,7 @@ from deepinsight.utils.summarizer import map_summarize_documents
 from deepinsight.utils.token_utils import count_tokens, term_document
 from deepinsight.tools.base import get_tools
 from deepinsight.graph.state import ResearchState
+from deepinsight.tools.search_provider import search_provider
 from deepinsight.utils.normalizers import normalize_data
 from deepinsight.prompts.prompt_demo import CHAT_PROMPT, PLANNER_PROMPT, REACHER_PROMPT, ROUTER_PROMPT,WRITER_PROMPT,REVIEVER_PROMPT, STYLE_ANALYZER_PROMPT
 
@@ -69,15 +70,15 @@ def router_node(state: ResearchState):
     category = category.strip().strip('"').lower()
 
     if "report" in category:
-        return {"next": "planner", "catagory": "report", "style": style}
+        return {"next": "planner", "category": "report", "style": style}
     if "search" in category:
         # Fallback search to planner for now as simple_researcher is not wired
-        return {"next": "planner", "catagory": "report", "style": style}
+        return {"next": "planner", "category": "report", "style": style}
     if "chat" in category:
-        return {"next": "chat", "catagory": "chat", "style": style}
+        return {"next": "chat", "category": "chat", "style": style}
     
     # Default to planner
-    return {"next": "planner", "catagory": "report", "style": style}
+    return {"next": "planner", "category": "report", "style": style}
 
 def planner_node(state: ResearchState):
     """
@@ -93,12 +94,12 @@ def planner_node(state: ResearchState):
     """
     task = state["task"]
     # Fix typo in State definition variable name matches
-    catagory = state.get("catagory","general")
+    category = state.get("category","general")
     review_feedback = state.get("review",{})
     llm = get_llm(model_tag="smart")
 
     if not review_feedback or review_feedback.get("status") == "pass":
-        system_prompt = PLANNER_PROMPT.format(category=catagory, task=task)
+        system_prompt = PLANNER_PROMPT.format(category=category, task=task)
         user_input = f"任务：{task}"
     else:
         print(f"---[Planner]收到Review反馈，调整计划{review_feedback}---")
@@ -222,15 +223,38 @@ def research_node(state: ResearchState):
         return {"current_step_index": len(plan)}
     
     main_task = state.get("task","")
+
+    category = state.get("category","general").lower()
+    config_map = {
+        "chat": "social_media",
+        "social": "social_media",
+        "travel": "travel",
+        "academia": "academic",
+        "report": "general",
+    }
+    search_mode = config_map.get(category, "general")
+    logger.info(f"---[Researcher]研究类别: {category},搜索模式: {search_mode}---")
     def execute_single_task(task_info):
         sub_task_description = task_info.get("description","")
         query = f'{main_task} - {sub_task_description}'
         try:
-            tavily_tool = TavilySearch(max_results=5)
-            res = rate_limited_call(tavily_tool.invoke, {"query": query})
-            raw_results = res.get("results", [])
+            cleaned_results = rate_limited_call(
+                search_provider.search,
+                query=query,
+                config_name=search_mode
+            )
+            new_docs = []
+            for item in cleaned_results:
+                doc = Document(
+                    page_content=item.get['content'],
+                    metadata={
+                        "source": item['url'],
+                        "title": item.get['title'],
+                        "type": item.get['type'],
+                    }
+                )
+                new_docs.append(doc)
 
-            new_docs = normalize_data(raw_results, query)
             if new_docs:
                 try:
                     vector_store.add_documents(new_docs)
@@ -241,12 +265,14 @@ def research_node(state: ResearchState):
             step_summary = ""
             if new_docs:
                 llm = get_llm(model_tag="smart")
+                text_only_docs = [d for d in new_docs if d.metadata.get("type") == "text"]
+                docs_to_summarize = text_only_docs if text_only_docs else new_docs
                 # 构建小型上下文
                 termmed_docs = term_document(
-                    new_docs,
+                    docs_to_summarize,
                     max_tokens=6000,
                 )
-                context_text = "\n".join([f"- {doc.get('text')}" for doc in termmed_docs])
+                context_text = "\n".join([f"- {doc.get('text', doc.page_content)}" for doc in termmed_docs])
                 prompt_content = REACHER_PROMPT.format(query=query, context_text=context_text)
 
                 try:
@@ -265,8 +291,8 @@ def research_node(state: ResearchState):
                 "success": True,
                 "results": step_summary,
                 "docs": new_docs,
-                "docs_ids": [doc.get("id") for doc in new_docs],
-                "raw_results": raw_results
+                "docs_ids": [doc.metadata.get("source") for doc in new_docs],
+                "raw_results": cleaned_results
             }
         
         except Exception as e:
@@ -319,11 +345,23 @@ def research_node(state: ResearchState):
     if len(all_new_docs) > MAX_FULL_TEXT_DOCS:
         print(f"---[Researcher]文档数量{len(all_new_docs)}，进行截断---")
         for d in all_new_docs:
-            light_doc = d.copy()
-            light_doc["text"] = d.get("text","")[:500]  # 截断正文
-            final_docs_for_state.append(light_doc)
+            light_doc_dict = {
+                "id": d.metadata.get("source"),
+                "text": d.page_content[:500],  # 截断内容
+                "title": d.metadata.get("title"),
+                "url": d.metadata.get("source"),
+                "type": d.metadata.get("type"),
+            }
+            final_docs_for_state.append(light_doc_dict)
     else:
-        final_docs_for_state = all_new_docs
+        for d in all_new_docs:
+            final_docs_for_state.append({
+                "id":d.metadata.get("source"),
+                "text":d.page_content,
+                "title":d.metadata.get("title"),
+                "url":d.metadata.get("source"),
+                "type":d.metadata.get("type"),
+            })
 
     return {
         "documents": final_docs_for_state,
