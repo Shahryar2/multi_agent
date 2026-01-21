@@ -188,7 +188,26 @@ async def stream_research(thread_id: str):
                     if event["name"] in ["router", "planner", "researcher", "writer", "verifier", "reviewer"]:
                         yield f"data: {json.dumps({'node': event['name']})}\n\n"
                 
-                # 3. Handle Interrupt (for Plan Approval)
+                # 3. Capture State Updates (Thought Process & Search Data)
+                elif kind == "on_chain_end":
+                     node_name = event.get("name")
+                     output = event.get("data", {}).get("output")
+                     
+                     # Extract thought_process from planner results
+                     if node_name == "planner" and isinstance(output, dict):
+                         if "thought_process" in output:
+                             yield f"data: {json.dumps({'thought': output['thought_process']})}\n\n"
+                     
+                     # Extract search_data from researcher results
+                     if node_name == "researcher" and isinstance(output, dict):
+                         if "search_data" in output:
+                             # Ensure it is serializable
+                             try:
+                                yield f"data: {json.dumps({'search_results': output['search_data']})}\n\n"
+                             except:
+                                 logger.error("Failed to serialize search data")
+                
+                # 4. Handle Interrupt (for Plan Approval)
                 # When using astream, if it hits `interrupt_after`, it just stops.
                 # We need to detect if we stopped at "planner".
                 # We can check the state after the loop?

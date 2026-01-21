@@ -59,9 +59,21 @@ def term_document(
     current_tokens = 0
 
     for doc in documents:
-        raw_text = doc.get("text", "")
-        text = ensure_content_string(raw_text)
+        if isinstance(doc,dict):
+            raw_text = doc.get("text", doc.get("page_content",""))
+            doc_dict = doc.copy()
+        else:
+            raw_text = getattr(doc, "page_content", "")
+            metadata = getattr(doc, "metadata", {})
+            doc_dict = {
+                "text": raw_text, 
+                "title": metadata.get("title", ""),
+                "url": metadata.get("source", ""),
+                "id": metadata.get("source", ""),
+                "type": metadata.get("type", ""),
+            }
 
+        text = ensure_content_string(raw_text)
         tokens = enc.encode(text)
         if len(tokens) > max_tokens_per_doc:
             tokens = tokens[:max_tokens_per_doc]
@@ -71,9 +83,9 @@ def term_document(
         if current_tokens + doc_token_count > max_tokens:
             logger.info(f"文档总 Token 已达上限 ({current_tokens} + {doc_token_count} > {max_tokens})，停止加载更多文档。")
             break
-        new_doc = doc.copy()
-        new_doc["text"] = text
-        trimmed_docs.append(new_doc)
+
+        doc_dict["text"] = text
+        trimmed_docs.append(doc_dict)
         current_tokens += doc_token_count
     logger.info(f"完成，保留{len(trimmed_docs)}/{len(documents)}篇，总 Token 数：{current_tokens}")
     return trimmed_docs

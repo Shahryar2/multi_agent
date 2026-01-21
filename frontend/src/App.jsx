@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Send, LogIn, UserCircle, Bot, Activity, Clock, Search, ChevronRight, Loader2 } from 'lucide-react';
+import { Send, LogIn, UserCircle, Bot, Activity, Clock, Search, ChevronRight, Loader2, PanelRightClose, PanelRightOpen, Brain, Sparkles, Image, ExternalLink } from 'lucide-react';
 import { ReferenceSidebar } from './components/ReferenceSidebar';
 import { ApprovalModal } from './components/ApprovalModal';
 import { LoginModal } from './components/LoginModal';
@@ -24,6 +24,7 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [sources, setSources] = useState([]);
   const [logs, setLogs] = useState([]);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   
   // Persist messages
   useEffect(() => {
@@ -120,6 +121,29 @@ function App() {
         // Logs
         if (data.node) {
           addLog(`Node Executed: ${data.node}`);
+        }
+
+        // Search Results
+        if (data.search_results) {
+             setMessages(prev => {
+                const last = prev[prev.length - 1];
+                if (last && last.role === 'assistant') {
+                    return [...prev.slice(0, -1), { ...last, searchResults: data.search_results }];
+                }
+                // If it arrives before any content? Should ideally exist or we create one.
+                return prev; 
+             });
+        }
+
+        // Thought Process
+        if (data.thought) {
+             setMessages(prev => {
+                const last = prev[prev.length - 1];
+                if (last && last.role === 'assistant') {
+                    return [...prev.slice(0, -1), { ...last, thought: data.thought }];
+                }
+                return prev;
+             });
         }
 
         // Streaming Content (Delta)
@@ -321,78 +345,154 @@ function App() {
                     // 2. Active Session Layout
                     <div className="flex-1 flex flex-col h-full bg-[#111111]">
                         {/* Status Bar */}
-                        <div className="h-14 border-b border-white/5 flex items-center justify-between px-6 bg-[#161616]">
+                        <div className="h-14 border-b border-white/5 flex items-center justify-between px-6 bg-[#161616] shrink-0">
                             <div className="flex items-center gap-3">
                                 <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/5 border border-white/10 text-blue-400">
                                     <Activity size={16} />
                                 </div>
-                                <div>
+                                <div className="hidden sm:block">
                                     <div className="text-xs text-gray-500 uppercase font-medium tracking-wider">Researching</div>
                                     <div className="text-sm text-white font-medium max-w-md truncate">{currentUserQuery}</div>
                                 </div>
                             </div>
                             
-                            {/* Steps / Progress placeholder if we had structured steps */}
-                            {isLoading && (
-                                <div className="flex items-center gap-3">
+                            <div className="flex items-center gap-3">
+                                {isLoading && (
                                    <div className="flex items-center gap-2 text-xs text-blue-400 bg-blue-500/10 px-3 py-1.5 rounded-full animate-pulse">
                                        <Clock size={12} />
-                                       <span>Processing...</span>
+                                       <span className="hidden sm:inline">Processing...</span>
                                    </div>
-                                   <button 
-                                     onClick={handleStop}
-                                     className="text-xs text-red-400 hover:text-white px-3 py-1.5 border border-red-500/30 rounded-lg hover:bg-red-500/20 transition-colors"
-                                   >
-                                     Stop
-                                   </button>
-                                </div>
-                            )}
-
-                            <div className="flex items-center gap-2">
+                                )}
+                                
                                 <button 
                                     onClick={clearChat}
                                     className="text-xs text-gray-500 hover:text-white px-3 py-1.5 rounded-lg hover:bg-white/5 transition-colors"
                                 >
                                     New Search
                                 </button>
+                                
+                                <button
+                                    onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+                                    className="p-2 hover:bg-white/5 rounded-lg text-gray-400 hover:text-white transition-colors border border-white/5"
+                                    title={isSidebarOpen ? "Close Sidebar" : "Open Sidebar"}
+                                >
+                                    {isSidebarOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
+                                </button>
                             </div>
                         </div>
 
                         {/* Split View Content */}
-                        <div className="flex-1 overflow-hidden flex flex-col md:flex-row">
+                        <div className="flex-1 overflow-hidden flex relative">
                              {/* Report Area */}
-                             <div 
-                                className="flex-1 overflow-y-auto custom-scrollbar p-6 md:p-8 lg:p-12" 
-                                ref={reportContainerRef}
-                             >
-                                <div className="max-w-3xl mx-auto">
-                                    {currentReport ? (
-                                        <div className="animate-in fade-in slide-in-from-bottom-4 duration-700">
-                                            <div className="markdown-body">
-                                                <Markdown remarkPlugins={[remarkGfm]}>{currentReport}</Markdown>
-                                            </div>
-                                            {isLoading && (
-                                                <div className="mt-4 flex items-center gap-2 text-gray-500 animate-pulse">
-                                                    <div className="h-2 w-2 rounded-full bg-blue-500"></div>
-                                                    <span className="text-xs">Generating content...</span>
+                             <div className="flex-1 flex flex-col min-w-0">
+                                 <div 
+                                    className="flex-1 overflow-y-auto custom-scrollbar p-6 md:p-8" 
+                                    ref={reportContainerRef}
+                                 >
+                                    <div className="max-w-3xl mx-auto space-y-8 pb-20">
+                                        {messages.length > 0 && (() => {
+                                            const activeMsg = messages.findLast(m => m.role === 'assistant');
+                                            if (!activeMsg) return <Loader2WithOrbit />;
+                                            
+                                            return (
+                                                <div className="animate-in fade-in slide-in-from-bottom-4 duration-700">
+                                                    
+                                                    {/* 1. Thought Process Visualization */}
+                                                    {activeMsg.thought && (
+                                                        <div className="mb-6 rounded-xl border border-blue-500/20 bg-blue-500/5 overflow-hidden">
+                                                            <div className="flex items-center gap-2 px-4 py-2 border-b border-blue-500/10 bg-blue-500/10 text-blue-400 text-xs font-medium uppercase tracking-wider">
+                                                                <Brain size={14} />
+                                                                <span>Thinking Process</span>
+                                                            </div>
+                                                            <div className="p-4 text-sm text-gray-300 font-mono whitespace-pre-wrap leading-relaxed max-h-60 overflow-y-auto custom-scrollbar">
+                                                                {activeMsg.thought}
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {/* 2. Search Results Visualization */}
+                                                    {activeMsg.searchResults && activeMsg.searchResults.length > 0 && (
+                                                        <div className="mb-8">
+                                                            <div className="flex items-center gap-2 mb-3 text-gray-400 text-sm font-medium">
+                                                                <Sparkles size={16} className="text-purple-400"/>
+                                                                <span>Sources Found</span>
+                                                            </div>
+                                                            <div className="flex gap-4 overflow-x-auto pb-4 custom-scrollbar snap-x">
+                                                                {activeMsg.searchResults.map((item, idx) => (
+                                                                    <div key={idx} className="flex-none w-60 bg-[#1a1a1a] rounded-xl border border-white/10 overflow-hidden hover:border-white/20 transition-all snap-start">
+                                                                        {item.images && item.images.length > 0 ? (
+                                                                            <div className="h-32 bg-gray-800 relative">
+                                                                                <img src={item.images[0]} alt="" className="w-full h-full object-cover opacity-80 hover:opacity-100 transition-opacity" />
+                                                                            </div>
+                                                                        ) : (
+                                                                            <div className="h-32 bg-gray-800 flex items-center justify-center text-gray-600">
+                                                                                <Image size={24} />
+                                                                            </div>
+                                                                        )}
+                                                                        <div className="p-3">
+                                                                            <div className="text-xs text-blue-400 mb-1 truncate">{(() => { try { return new URL(item.url).hostname } catch { return 'web' } })()}</div>
+                                                                            <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-sm font-medium text-gray-200 line-clamp-2 hover:text-blue-400 transition-colors flex gap-1 items-start">
+                                                                                {item.title}
+                                                                                <ExternalLink size={10} className="mt-1 shrink-0 opacity-50" />
+                                                                            </a>
+                                                                        </div>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {/* 3. Main Report Content */}
+                                                    {activeMsg.content && (
+                                                        <div className="markdown-body">
+                                                            <Markdown remarkPlugins={[remarkGfm]}>{activeMsg.content}</Markdown>
+                                                        </div>
+                                                    )}
+                                                    
+                                                    {isLoading && !activeMsg.content && (
+                                                        <div className="mt-8 flex flex-col items-center gap-2 text-gray-500 opacity-50">
+                                                            <Loader2 className="animate-spin" />
+                                                            <span className="text-xs font-mono">Synthesizing information...</span>
+                                                        </div>
+                                                    )}
                                                 </div>
-                                            )}
-                                        </div>
-                                    ) : (
-                                        <div className="h-full flex flex-col items-center justify-center text-gray-500 gap-4 opacity-50">
-                                            <Loader2WithOrbit />
-                                            <p className="text-sm font-mono">Initializing Research Agent...</p>
-                                        </div>
-                                    )}
-                                </div>
+                                            );
+                                        })()}
+                                    </div>
+                                 </div>
+
+                                 {/* Persistent Input Box */}
+                                 <div className="p-4 border-t border-white/10 bg-[#111111]">
+                                    <div className="max-w-3xl mx-auto relative flex items-center bg-[#1a1a1a] rounded-xl border border-white/10 p-2 shadow-2xl">
+                                        <Search className="ml-3 text-gray-500" size={20} />
+                                        <input 
+                                            type="text" 
+                                            value={input}
+                                            onChange={(e) => setInput(e.target.value)}
+                                            onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+                                            disabled={isLoading}
+                                            placeholder={isLoading ? "Research in progress..." : "Ask a follow-up question..."} 
+                                            className="flex-1 bg-transparent border-none px-4 py-2 text-white focus:outline-none placeholder:text-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        />
+                                        <button 
+                                            onClick={handleSend}
+                                            disabled={!input.trim() || isLoading}
+                                            className="p-2 rounded-lg bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-50 disabled:hover:bg-blue-600 transition-all"
+                                        >
+                                            <Send size={16} />
+                                        </button>
+                                    </div>
+                                 </div>
+                             </div>
+
+                             {/* Right Sidebar */}
+                             <div className={`transition-all duration-300 ease-in-out border-l border-white/10 bg-[#161616] flex flex-col ${isSidebarOpen ? 'w-80 opacity-100' : 'w-0 opacity-0 overflow-hidden border-l-0'}`}>
+                                <ReferenceSidebar sources={sources} logs={logs} />
                              </div>
                         </div>
                     </div>
                 )}
             </div>
-
-            {/* Right Sidebar: Sources & Logs (Hidden on mobile, only visible when input is active) */}
-            {messages.length > 0 && <ReferenceSidebar sources={sources} logs={logs} />}
          </main>
       </div>
 

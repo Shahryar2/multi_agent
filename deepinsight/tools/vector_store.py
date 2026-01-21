@@ -16,9 +16,9 @@ class VectorStore:
         self.collection = collection
         self.persist_directory = persist_directory
 
-        embedding_model = os.getenv("Embedding_model", "text-embedding-3-small")
-        embedding_api_key = os.getenv("Embedding_API_KEY")
-        embedding_api_base = os.getenv("Embedding_API_BASE")
+        embedding_model = os.getenv("OPENAI_Embedding_MODEL", "text-embedding-3-small")
+        embedding_api_key = os.getenv("OPENAI_API_KEY")
+        embedding_api_base = os.getenv("OPENAI_API_BASE")
         self.embedding_model = OpenAIEmbeddings(
             model=embedding_model, 
             chunk_size=1000,
@@ -144,10 +144,10 @@ if __name__ == "__main__":
     try:
         # 1. 打印配置信息 (脱敏)
         vs = VectorStore()
-        api_key = os.getenv("Embedding_API_KEY", "")
+        api_key = os.getenv("OPENAI_API_KEY", "")
         masked_key = api_key[:8] + "****" + api_key[-4:] if api_key else "未配置"
-        print(f"API Base: {os.getenv('Embedding_API_BASE')}")
-        print(f"Model: {os.getenv('Embedding_model')}")
+        print(f"API Base: {os.getenv('OPENAI_API_BASE')}")
+        print(f"Model: {os.getenv('OPENAI_Embedding_MODEL')}")
         print(f"API Key: {masked_key}")
 
         # 2. 测试 Embedding 生成

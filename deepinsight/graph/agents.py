@@ -38,16 +38,18 @@ def router_node(state: ResearchState):
         return {"next": "chat"}
 
     llm = get_llm(model_tag="smart")
-    
-    system_prompt = ROUTER_PROMPT
 
-    # Combine system prompt into user message to compatibility with some proxies
-    prompt = ChatPromptTemplate.from_messages([
-        ("user", f"{system_prompt}\n\n用户输入: {{task}}")
-    ])
-    chain = prompt | llm | StrOutputParser()
     try:
-        category = chain.invoke({"task": task})
+        system_prompt = ROUTER_PROMPT
+        # Combine system prompt into user message to compatibility with some proxies
+        prompt = ChatPromptTemplate.from_messages([
+            ("user", f"{system_prompt}\n\n用户输入: {{task}}")
+        ])
+        chain = prompt | llm | StrOutputParser()
+
+        logger.info(f"--- [Router] 正在调用LLM进行场景分类... ---")
+        category = rate_limited_call(chain.invoke, {"task": task})
+
         logger.info(f"Router category: {category}")
         
         # Analyze style
@@ -55,7 +57,10 @@ def router_node(state: ResearchState):
             ("user", f"{STYLE_ANALYZER_PROMPT}\n\n用户输入: {{task}}")
         ])
         style_chain = style_prompt | llm | StrOutputParser()
-        style = style_chain.invoke({"task": task}).strip().strip('"').lower()
+
+        logger.info(f"--- [Router] 正在调用LLM进行风格分析... ---")
+        style = rate_limited_call(style_chain.invoke, {"task": task})
+        style = style.strip().strip('"').lower()
         if style not in ["casual", "story"]:
             style = "professional"
         logger.info(f"Router detected style: {style}")
@@ -99,10 +104,12 @@ def planner_node(state: ResearchState):
     llm = get_llm(model_tag="smart")
 
     if not review_feedback or review_feedback.get("status") == "pass":
+        thought_msg = f"任务 '{task}'确定为新任务，开始拆解初步执行计划...."
         system_prompt = PLANNER_PROMPT.format(category=category, task=task)
         user_input = f"任务：{task}"
     else:
         print(f"---[Planner]收到Review反馈，调整计划{review_feedback}---")
+        thought_msg = f"收到审核反馈，正在根据意见[{review_feedback.get('reason')}]调整执行计划...."
         system_prompt = f"""
         你是一个具有深度反思能力的首席分析师。
         你之前的研究计划未能通过审核，现在需要基于反馈进行反思并调整计划。
@@ -161,7 +168,8 @@ def planner_node(state: ResearchState):
                 "description":f"针对{task}进行补充搜索",
                 "status":"pending"
             }],
-            "current_step_index": 0
+            "current_step_index": 0,
+            "thought_process": thought_msg
         }
     
 def orchestrator_node(state: ResearchState):
@@ -185,11 +193,11 @@ def rate_limited_call(func, *args, **kwargs):
         with api_semaphore:
             try:
                 # 随机抖动
-                time.sleep(random.uniform(0.5, 1.5))
+                time.sleep(random.uniform(1.0, 2.5))
                 return func(*args, **kwargs)
             except Exception as e:
-                if '429' in str(e) and attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 5
+                if ('429' in str(e) or '500' in str(e)) and attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 8
                     logger.warning(f"API调用失败，尝试重试 {attempt+1}/{max_retries} 次: {e}")
                     time.sleep(wait_time)
                     continue
@@ -246,11 +254,11 @@ def research_node(state: ResearchState):
             new_docs = []
             for item in cleaned_results:
                 doc = Document(
-                    page_content=item.get['content'],
+                    page_content=item.get('content'),
                     metadata={
                         "source": item['url'],
-                        "title": item.get['title'],
-                        "type": item.get['type'],
+                        "title": item.get('title'),
+                        "type": item.get('type'),
                     }
                 )
                 new_docs.append(doc)
@@ -272,7 +280,17 @@ def research_node(state: ResearchState):
                     docs_to_summarize,
                     max_tokens=6000,
                 )
-                context_text = "\n".join([f"- {doc.get('text', doc.page_content)}" for doc in termmed_docs])
+                
+                formatted_contents = []
+                for doc in termmed_docs:
+                    if isinstance(doc,dict):
+                        content = doc.get("text",doc.get("page_content",""))
+                    else:
+                        content = getattr(doc,"page_content","")
+                    formatted_contents.append(f"- {content}")
+
+                context_text = "\n".join(formatted_contents)
+                
                 prompt_content = REACHER_PROMPT.format(query=query, context_text=context_text)
 
                 try:
@@ -367,7 +385,8 @@ def research_node(state: ResearchState):
         "documents": final_docs_for_state,
         "current_step_index": len(plan),
         "plan": plan,
-        "bg_investigation": all_raw_results
+        "bg_investigation": all_raw_results,
+        "search_data": all_raw_results
     }
 
 def writer_node(state: ResearchState):
@@ -478,18 +497,24 @@ def writer_node(state: ResearchState):
     
     citations = []
     for idx,seg in enumerate(retrieved_docs,start=1):
+        is_dict = isinstance(seg, dict)
+        text_content = seg.get("text") if is_dict else seg.page_content
+        title_content = seg.get("title") if is_dict else seg.metadata.get("title", "Untitled")
+        url_content = seg.get("url") if is_dict else seg.metadata.get("source", "")
+        doc_id = seg.get("id") if is_dict else seg.metadata.get("source","unknown")
+
         citations.append({
             "index":idx,
-            "id":seg.get("id"),
-            "title": seg.get("title"),
-            "url": seg.get("url"),
-            "snippet": seg.get("text")[:300],
-            "full_text": seg.get("text")    # 可选(作为前端展示书写过程)
+            "id":doc_id,
+            "title": title_content,
+            "url": url_content,
+            "snippet": text_content[:300],
+            "full_text": text_content    # 可选(作为前端展示书写过程)
         })
     
     docs_context = "\n\n".join([
-        f"[{i+1}] Title: {seg.get('title')}\nContent: {seg.get('text')}\nSource: {seg.get('url')}" 
-        for i, seg in enumerate(retrieved_docs)
+        f"[{c['index']}] Title: {c['title']}\nContent: {c['full_text']}\nSource: {c['url']}" 
+        for c in citations
     ])
 
     full_prompt = WRITER_PROMPT.format(task=task, style=style, plan_context=plan_context, docs_context=docs_context)
