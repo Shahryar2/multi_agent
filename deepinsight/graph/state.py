@@ -19,6 +19,7 @@ class ResearchState(TypedDict):
     catagory: str # 任务场景
     style: str # 写作风格
     plan: List[SubTask] # 任务步骤列表
+    review: Dict[str, Any]  # 评审
     current_step_index: int # 当前步骤索引
     documents: Annotated[List[Dict[str, Any]], operator.add]    # 已收集文档
     draft: str  # 初稿
@@ -27,7 +28,6 @@ class ResearchState(TypedDict):
     max_revisions: int  # 最大修订次数
     next: str   # 下一步行动
     bg_investigation: Annotated[List[Dict[str, Any]], operator.add]  # 背景调查
-    review: Dict[str, Any]  # 评审
     response: str # 用于存储聊天回复
 
     thought_process: str # 前端展示系统思考

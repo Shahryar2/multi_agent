@@ -159,7 +159,11 @@ def planner_node(state: ResearchState):
             if "status" not in step:
                 step["status"] = "pending"
 
-        return {"plan": plan,"current_step_index": 0}
+        return {
+            "plan": plan,
+            "current_step_index": 0,
+            "thought_process": thought_msg
+        }
     except Exception as e:
         print(f"---[Planner]解析失败，使用原始任务{e}---")
         return {
@@ -251,7 +255,21 @@ def research_node(state: ResearchState):
                 query=query,
                 config_name=search_mode
             )
+            """
+            返回格式:
+            [
+                {
+                "title": str,
+                "url": str,
+                "content": str,
+                "type": "text",
+                "images": [...]
+                },
+                ...
+            ]
+            """
             new_docs = []
+            # 转换为 Langchain Document 对象
             for item in cleaned_results:
                 doc = Document(
                     page_content=item.get('content'),
@@ -307,10 +325,10 @@ def research_node(state: ResearchState):
                     
             return {
                 "success": True,
-                "results": step_summary,
-                "docs": new_docs,
-                "docs_ids": [doc.metadata.get("source") for doc in new_docs],
-                "raw_results": cleaned_results
+                "results": step_summary,    # 子任务结果总结
+                "docs": new_docs,   # Langchain Document 对象列表
+                "docs_ids": [doc.metadata.get("source") for doc in new_docs],   # URL 列表
+                "raw_results": cleaned_results  # 原始搜索结果
             }
         
         except Exception as e:
@@ -357,7 +375,8 @@ def research_node(state: ResearchState):
             plan[idx]["result"] = f"任务失败: {res.get('error')}"
             desc = plan[idx].get('description', 'Unknown Task')
             print(f"---[Researcher]子任务失败: {desc[:50]}---")
-
+    
+    """ 文档截断 与 格式转换 """
     final_docs_for_state = []
     MAX_FULL_TEXT_DOCS = 5
     if len(all_new_docs) > MAX_FULL_TEXT_DOCS:
@@ -517,7 +536,12 @@ def writer_node(state: ResearchState):
         for c in citations
     ])
 
-    full_prompt = WRITER_PROMPT.format(task=task, style=style, plan_context=plan_context, docs_context=docs_context)
+    full_prompt = WRITER_PROMPT.format(
+        task=task, 
+        style=style, 
+        plan_context=plan_context, 
+        docs_context=docs_context
+    )
     
     # Combine messages for compatibility
     messages = [
