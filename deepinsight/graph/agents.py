@@ -73,17 +73,25 @@ def router_node(state: ResearchState):
 
     # Normalize category
     category = category.strip().strip('"').lower()
+    
+    # saved history context
+    base_return = {
+        "category": category,
+        "style": style,
+        "last_draft": state.get("last_draft",""),
+        "last_citations": state.get("last_citations",[])
+    }
 
     if "report" in category:
-        return {"next": "planner", "category": "report", "style": style}
+        return {**base_return,"next": "planner"}
     if "search" in category:
         # Fallback search to planner for now as simple_researcher is not wired
-        return {"next": "planner", "category": "report", "style": style}
+        return {**base_return,"next": "planner"}
     if "chat" in category:
-        return {"next": "chat", "category": "chat", "style": style}
+        return {**base_return,"next": "chat"}
     
     # Default to planner
-    return {"next": "planner", "category": "report", "style": style}
+    return {**base_return,"next": "planner"}
 
 def planner_node(state: ResearchState):
     """
@@ -558,10 +566,21 @@ def writer_node(state: ResearchState):
         citations_footer = "\n\n## 引用列表\n" + "\n".join(
             f"[{c['index']}] {c['title']} — {c['url']}" for c in citations
         )
-        return {"draft": final_draft + citations_footer, "citations": citations}
+        return {
+            "draft": final_draft + citations_footer, 
+            "citations": citations,
+            # 保存上下文
+            "last_draft": final_draft,
+            "last_citations": citations
+        }
     except Exception as e:
         logger.error(f"Writer LLM failed: {e}")
-        return {"draft": "生成报告失败。", "citations": []}
+        return {
+            "draft": "生成报告失败。", 
+            "citations": [],
+            "last_draft": "",
+            "last_citations": []
+        }
     
 def verifier_node(state: ResearchState):
     """
@@ -644,18 +663,99 @@ def simple_researcher_node(state: ResearchState):
 def chat_node(state: ResearchState):
     """
     聊天节点
+
+    Input:
+    {
+        "task": str,
+        "last_draft": str,
+        "messages": [{...}, ...],
+    }
+
+    Output:
+    {
+        "response": str,
+        "messages": [{"role": str,...}, ...],
+    }
     """
     task = state["task"]
+    last_draft = state.get("last_draft", "")
+    last_citations = state.get("last_citations", [])
+    messages = state.get("messages", [])
+
     llm = get_llm(model_tag="basic")
 
-    # Combine messages
-    prompt = ChatPromptTemplate.from_messages([
-        ("user", f"{CHAT_PROMPT}\n\nUser: {{task}}")
-    ])
-    
-    chain = prompt | llm | StrOutputParser()
-    response = chain.invoke({"task": task})
-    
-    logger.info(f"聊天响应：{response}")
-    print(f"聊天响应：{response}")
-    return {"response": response}
+    logger.info(f"--- [Chat] 用户问题：{task[:50]}... ---")
+    system_prompt = CHAT_PROMPT
+
+    context_injection = ""
+    if last_draft:
+        draft_excerpt = last_draft[:2000]
+        context_injection = f"""
+    【生成的研究报告节选】
+    {draft_excerpt}
+
+    【引用】
+    {chr(10).join([f"[{c['index']}] {c['title']}" for c in last_citations[:5]])}
+    """
+        logger.info(f"--- [Chat] 注入上下文信息 ---")
+
+    if not messages:
+        messages = []
+
+    if not any(m.get("role") == "system" for m in messages):
+        messages.insert(0, {
+            "role": "system", 
+            "content": system_prompt + context_injection
+        })
+    messages.append({
+        "role": "user",
+        "content": task
+    })
+
+    lc_messages = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content")
+        if role == "system":
+            lc_messages.append(SystemMessage(content=content))
+        elif role == "user":
+            lc_messages.append(HumanMessage(content=content))
+        # Adjust if AssistantMessage is available
+        elif role == "assistant":
+            from langchain_core.messages import AIMessage
+            lc_messages.append(AIMessage(content=content))
+
+    try:
+        logger.info(f"--- [Chat] 正在调用LLM进行响应生成... ---")
+        response = rate_limited_call(llm.invoke, lc_messages)
+        assistant_response = response.content
+        # Update messages history
+        messages.append({
+            "role": "assistant",
+            "content": assistant_response
+        })
+        # 限制保留对话轮数
+        system_messages = [m for m in messages if m.get("role") == "system"]
+        orther_messages = [m for m in messages if m.get("role") != "system"]
+        if len(orther_messages) > 20:
+            orther_messages = orther_messages[-20:]
+        messages = system_messages + orther_messages
+        logger.info(f"--- [Chat] 响应生成完成 ---")
+
+        return {
+            "response": assistant_response,
+            "messages": messages
+        }
+
+    except Exception as e:
+        logger.error(f"Chat LLM failed: {e}")
+        error_response = f"抱歉，聊天服务暂时不可用。错误信息: {str(e)[:100]}"
+        messages.append({
+            "role": "assistant",
+            "content": error_response
+        })
+        return {
+            "response": error_response,
+            "messages": messages
+        }
+        
