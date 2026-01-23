@@ -107,36 +107,35 @@ class EnhancedTavilyWrapper:
 
     def _process_results(self, raw_response: Dict[str, Any], include_images: bool) -> List[Dict[str, Any]]:
         """
-        管道：清洗结果，分离文本、图片
-        Output Fromat:
+        改进版：文本和图片关联呈现
+        Output Format:
         [
-            {"type": "text", "title": "...","url": "...", "content": "..."},
-            {"type": "image", "title": "...", "url": "...", "content":"[图片]"}
+            {
+                "type": "text", 
+                "title": "...",
+                "url": "...", 
+                "content": "...",
+                "score": 0.0,
+                "related_images": [  # 新增
+                    {"url": "...", "description": "..."},
+                ]
+            },
+            {
+                "type": "image",
+                "url": "...",
+                "description": "..."
+            }
         ]
         """
         process_data = []
-        # 1. 处理文本内容
-        results = raw_response.get("results", [])
-        for res in results:
-            content = res.get("content", "").strip()
-            if len(content) < 30:
-                continue  # 跳过过短内容
-            
-            item = {
-                "type": "text",
-                "title": res.get("title", "No Title"),
-                "url": res.get("url", ""),
-                "content": content,
-                "score": res.get("score", 0.0)
-            }
-            process_data.append(item)
-
-        # 2. 处理图片内容
-        images = raw_response.get("images", [])
-        if include_images and images:
-            # 去重
+        
+        # 1. 先收集所有图片（用于关联）
+        all_images = raw_response.get("images", [])
+        processed_images = []
+        
+        if include_images and all_images:
             unique_image_urls = set()
-            for img in images:
+            for img in all_images:
                 if isinstance(img, str):
                     url = img
                     desc = "Image result"
@@ -145,21 +144,52 @@ class EnhancedTavilyWrapper:
                     desc = img.get("description") or "Image result"
                 else:
                     continue
-
+                
                 if not url or not url.startswith("http"):
                     continue
                 if url in unique_image_urls:
                     continue
+                
                 unique_image_urls.add(url)
-
-                process_data.append({
-                    "type": "image",
-                    "title": "Image Result",
+                processed_images.append({
                     "url": url,
-                    "content": f"[图片] URL: {url} | 描述: {desc}",
-                    "score": 0.0
+                    "description": desc
                 })
-
+        
+        # 2. 处理文本内容（关联相关图片）
+        results = raw_response.get("results", [])
+        for idx, res in enumerate(results):
+            content = res.get("content", "").strip()
+            if len(content) < 30:
+                continue
+            
+            # 为每个文本关联 2-3 张图片（简单策略：循环分配）
+            related_images = []
+            if include_images and processed_images:
+                # 每个文本分配 2-3 张图片
+                start_idx = (idx * 2) % len(processed_images)
+                for i in range(2):
+                    img_idx = (start_idx + i) % len(processed_images)
+                    related_images.append(processed_images[img_idx])
+            
+            item = {
+                "type": "text",
+                "title": res.get("title", "No Title"),
+                "url": res.get("url", ""),
+                "content": content,
+                "score": res.get("score", 0.0),
+                "related_images": related_images  # 新增字段
+            }
+            process_data.append(item)
+        
+        # 3. 单独的图片项（用于纯图片展示）
+        for img in processed_images:
+            process_data.append({
+                "type": "image",
+                "url": img["url"],
+                "description": img["description"]
+            })
+        
         return process_data
 
 # 全局实例

@@ -85,7 +85,10 @@ function App() {
     const query = input;
     setInput('');
     // Initial user message
-    setMessages([{ role: 'user', content: query }]);
+    setMessages([
+        { role: 'user', content: query },
+        { role: 'assistant', content: ''}
+    ]);
     setIsLoading(true);
     addLog(`Starting task: ${query.substring(0, 20)}...`);
 
@@ -131,7 +134,7 @@ function App() {
                     return [...prev.slice(0, -1), { ...last, searchResults: data.search_results }];
                 }
                 // If it arrives before any content? Should ideally exist or we create one.
-                return prev; 
+                return [...prev, { role: 'assistant', searchResults: data.search_results }];
              });
         }
 
@@ -397,62 +400,145 @@ function App() {
                                             return (
                                                 <div className="animate-in fade-in slide-in-from-bottom-4 duration-700">
                                                     
-                                                    {/* 1. Thought Process Visualization */}
+                                                    {/* 1. Thought Process Visualization - 改进版本 */}
                                                     {activeMsg.thought && (
-                                                        <div className="mb-6 rounded-xl border border-blue-500/20 bg-blue-500/5 overflow-hidden">
-                                                            <div className="flex items-center gap-2 px-4 py-2 border-b border-blue-500/10 bg-blue-500/10 text-blue-400 text-xs font-medium uppercase tracking-wider">
-                                                                <Brain size={14} />
-                                                                <span>Thinking Process</span>
+                                                        <div className="mb-8 rounded-lg border border-cyan-500/30 bg-gradient-to-br from-cyan-500/5 to-blue-500/5 overflow-hidden">
+                                                            <div className="flex items-center gap-2 px-4 py-3 border-b border-cyan-500/20 bg-cyan-500/10 text-cyan-300 text-xs font-semibold uppercase tracking-wider">
+                                                                <Brain size={14} className="text-cyan-400" />
+                                                                <span>System Thinking</span>
                                                             </div>
-                                                            <div className="p-4 text-sm text-gray-300 font-mono whitespace-pre-wrap leading-relaxed max-h-60 overflow-y-auto custom-scrollbar">
+                                                            <div className="p-4 text-xs text-gray-300 font-mono whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto custom-scrollbar space-y-1">
                                                                 {activeMsg.thought}
                                                             </div>
                                                         </div>
                                                     )}
 
-                                                    {/* 2. Search Results Visualization */}
+                                                    {/* 2. Search Results Visualization - 穿插显示版本 */}
                                                     {activeMsg.searchResults && activeMsg.searchResults.length > 0 && (
                                                         <div className="mb-8">
-                                                            <div className="flex items-center gap-2 mb-3 text-gray-400 text-sm font-medium">
-                                                                <Sparkles size={16} className="text-purple-400"/>
-                                                                <span>Sources Found</span>
+                                                            <div className="flex items-center gap-2 mb-4 text-gray-400 text-sm font-medium">
+                                                                <Sparkles size={16} className="text-cyan-400"/>
+                                                                <span>Research Sources</span>
                                                             </div>
-                                                            <div className="flex gap-4 overflow-x-auto pb-4 custom-scrollbar snap-x">
-                                                                {activeMsg.searchResults.map((item, idx) => (
-                                                                    <div key={idx} className="flex-none w-60 bg-[#1a1a1a] rounded-xl border border-white/10 overflow-hidden hover:border-white/20 transition-all snap-start">
-                                                                        {item.images && item.images.length > 0 ? (
-                                                                            <div className="h-32 bg-gray-800 relative">
-                                                                                <img src={item.images[0]} alt="" className="w-full h-full object-cover opacity-80 hover:opacity-100 transition-opacity" />
+                                                            
+                                                            {/* 网格布局：文本和图片穿插 */}
+                                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                                {activeMsg.searchResults.map((item, idx) => {
+                                                                    // 文本项
+                                                                    if (item.type === 'text') {
+                                                                        return (
+                                                                            <div key={idx} className="group">
+                                                                                {/* 文本卡片 */}
+                                                                                <div className="bg-gradient-to-br from-[#1a1a1a] to-[#0f0f0f] rounded-lg border border-cyan-500/20 hover:border-cyan-400/50 transition-all overflow-hidden shadow-lg hover:shadow-cyan-900/20">
+                                                                                    <div className="p-4 space-y-3 border-b border-white/5">
+                                                                                        <div>
+                                                                                            <div className="text-xs text-cyan-400/80 mb-1 truncate font-mono">
+                                                                                                {(() => {
+                                                                                                    try {
+                                                                                                        return new URL(item.url).hostname;
+                                                                                                    } catch {
+                                                                                                        return 'web';
+                                                                                                    }
+                                                                                                })()}
+                                                                                            </div>
+                                                                                            <a
+                                                                                                href={item.url}
+                                                                                                target="_blank"
+                                                                                                rel="noopener noreferrer"
+                                                                                                className="text-sm font-semibold text-gray-100 hover:text-cyan-300 transition-colors flex gap-1 items-start group/link line-clamp-2"
+                                                                                            >
+                                                                                                {item.title}
+                                                                                                <ExternalLink size={12} className="mt-0.5 shrink-0 opacity-40 group-hover/link:opacity-100" />
+                                                                                            </a>
+                                                                                        </div>
+                                                                                        <p className="text-xs text-gray-400 line-clamp-3 leading-relaxed">
+                                                                                            {item.content}
+                                                                                        </p>
+                                                                                    </div>
+                                                                                </div>
+
+                                                                                {/* 关联图片：穿插显示 */}
+                                                                                {item.related_images && item.related_images.length > 0 && (
+                                                                                    <div className="flex gap-2 mt-3 overflow-x-auto pb-1">
+                                                                                        {item.related_images.map((img, imgIdx) => (
+                                                                                            <a
+                                                                                                key={imgIdx}
+                                                                                                href={img.url}
+                                                                                                target="_blank"
+                                                                                                rel="noopener noreferrer"
+                                                                                                className="flex-none w-20 h-20 rounded-lg overflow-hidden border border-cyan-500/20 hover:border-cyan-400/50 transition-all group/img shadow-md hover:shadow-cyan-900/30"
+                                                                                                title={img.description}
+                                                                                            >
+                                                                                                <img
+                                                                                                    src={img.url}
+                                                                                                    alt={img.description}
+                                                                                                    className="w-full h-full object-cover opacity-75 group-hover/img:opacity-100 transition-opacity"
+                                                                                                    onError={(e) => {
+                                                                                                        e.target.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"%3E%3Crect fill="%231a1a1a" width="100" height="100"/%3E%3Ccircle cx="50" cy="50" r="30" fill="none" stroke="%23444" stroke-width="2"/%3E%3Cpath d="M35 65 L65 35 M35 35 L65 65" stroke="%23444" stroke-width="2"/%3E%3C/svg%3E';
+                                                                                                    }}
+                                                                                                />
+                                                                                            </a>
+                                                                                        ))}
+                                                                                    </div>
+                                                                                )}
                                                                             </div>
-                                                                        ) : (
-                                                                            <div className="h-32 bg-gray-800 flex items-center justify-center text-gray-600">
-                                                                                <Image size={24} />
+                                                                        );
+                                                                    }
+
+                                                                    // 纯图片项
+                                                                    if (item.type === 'image') {
+                                                                        return (
+                                                                            <div key={idx} className="h-40 rounded-lg border border-cyan-500/20 overflow-hidden hover:border-cyan-400/50 transition-all shadow-md hover:shadow-cyan-900/30">
+                                                                                <a
+                                                                                    href={item.url}
+                                                                                    target="_blank"
+                                                                                    rel="noopener noreferrer"
+                                                                                    className="w-full h-full block relative group/imgcard bg-gradient-to-br from-[#1a1a1a] to-[#0f0f0f]"
+                                                                                    title={item.description}
+                                                                                >
+                                                                                    <img
+                                                                                        src={item.url}
+                                                                                        alt={item.description}
+                                                                                        className="w-full h-full object-cover opacity-75 group-hover/imgcard:opacity-100 transition-opacity"
+                                                                                        onError={(e) => {
+                                                                                            e.target.style.display = 'none';
+                                                                                            e.target.parentElement.innerHTML = '<div class="w-full h-full bg-gradient-to-br from-gray-800 to-gray-900 flex items-center justify-center"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-8 h-8 text-gray-600"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>';
+                                                                                        }}
+                                                                                    />
+                                                                                    <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover/imgcard:opacity-100 transition-opacity flex items-end p-3">
+                                                                                        <span className="text-xs text-gray-200 line-clamp-2">{item.description}</span>
+                                                                                    </div>
+                                                                                </a>
                                                                             </div>
-                                                                        )}
-                                                                        <div className="p-3">
-                                                                            <div className="text-xs text-blue-400 mb-1 truncate">{(() => { try { return new URL(item.url).hostname } catch { return 'web' } })()}</div>
-                                                                            <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-sm font-medium text-gray-200 line-clamp-2 hover:text-blue-400 transition-colors flex gap-1 items-start">
-                                                                                {item.title}
-                                                                                <ExternalLink size={10} className="mt-1 shrink-0 opacity-50" />
-                                                                            </a>
-                                                                        </div>
-                                                                    </div>
-                                                                ))}
+                                                                        );
+                                                                    }
+
+                                                                    return null;
+                                                                })}
                                                             </div>
                                                         </div>
                                                     )}
 
-                                                    {/* 3. Main Report Content */}
+                                                    {/* 3. Main Report Content - 带分类样式 */}
                                                     {activeMsg.content && (
-                                                        <div className="markdown-body">
-                                                            <Markdown remarkPlugins={[remarkGfm]}>{activeMsg.content}</Markdown>
+                                                        <div className="space-y-6">
+                                                            <div className="flex items-center gap-2 mb-4 text-gray-300 text-sm font-semibold">
+                                                                <Sparkles size={16} className="text-amber-400" />
+                                                                <span>Research Report</span>
+                                                            </div>
+                                                            <div className="markdown-body bg-gradient-to-br from-[#1a1a1a] to-[#0f0f0f] border border-white/5 rounded-lg p-6 prose-invert prose-sm max-w-none">
+                                                                <Markdown remarkPlugins={[remarkGfm]}>{activeMsg.content}</Markdown>
+                                                            </div>
                                                         </div>
                                                     )}
                                                     
                                                     {isLoading && !activeMsg.content && (
-                                                        <div className="mt-8 flex flex-col items-center gap-2 text-gray-500 opacity-50">
-                                                            <Loader2 className="animate-spin" />
-                                                            <span className="text-xs font-mono">Synthesizing information...</span>
+                                                        <div className="mt-12 flex flex-col items-center gap-3 text-gray-500">
+                                                            <div className="relative w-12 h-12 mb-2">
+                                                                <div className="absolute inset-0 border-2 border-transparent border-t-cyan-400 border-r-cyan-400 rounded-full animate-spin"></div>
+                                                                <div className="absolute inset-1 border-2 border-transparent border-b-purple-400 rounded-full animate-spin" style={{animationDirection: 'reverse'}}></div>
+                                                            </div>
+                                                            <span className="text-xs font-mono text-gray-400">Synthesizing information...</span>
                                                         </div>
                                                     )}
                                                 </div>
@@ -461,26 +547,55 @@ function App() {
                                     </div>
                                  </div>
 
-                                 {/* Persistent Input Box */}
-                                 <div className="p-4 border-t border-white/10 bg-[#111111]">
-                                    <div className="max-w-3xl mx-auto relative flex items-center bg-[#1a1a1a] rounded-xl border border-white/10 p-2 shadow-2xl">
-                                        <Search className="ml-3 text-gray-500" size={20} />
-                                        <input 
-                                            type="text" 
-                                            value={input}
-                                            onChange={(e) => setInput(e.target.value)}
-                                            onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                                            disabled={isLoading}
-                                            placeholder={isLoading ? "Research in progress..." : "Ask a follow-up question..."} 
-                                            className="flex-1 bg-transparent border-none px-4 py-2 text-white focus:outline-none placeholder:text-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
-                                        />
-                                        <button 
-                                            onClick={handleSend}
-                                            disabled={!input.trim() || isLoading}
-                                            className="p-2 rounded-lg bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-50 disabled:hover:bg-blue-600 transition-all"
-                                        >
-                                            <Send size={16} />
-                                        </button>
+                                 {/* Persistent Input Box with Stop Button */}
+                                 <div className="p-4 border-t border-white/10 bg-[#111111] space-y-3">
+                                    {/* Status Indicator */}
+                                    {isLoading && (
+                                        <div className="flex items-center gap-2 px-4 py-2 bg-cyan-500/10 border border-cyan-500/30 rounded-lg">
+                                            <div className="flex gap-1">
+                                                <div className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-bounce" style={{animationDelay: '0ms'}}></div>
+                                                <div className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-bounce" style={{animationDelay: '150ms'}}></div>
+                                                <div className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-bounce" style={{animationDelay: '300ms'}}></div>
+                                            </div>
+                                            <span className="text-xs text-cyan-300 font-medium">Research in progress...</span>
+                                        </div>
+                                    )}
+                                    
+                                    <div className="max-w-3xl mx-auto relative flex items-center gap-2">
+                                        <div className="flex-1 relative flex items-center bg-[#1a1a1a] rounded-lg border border-white/10 p-2 shadow-2xl hover:border-white/20 transition-colors">
+                                            <Search className="ml-3 text-gray-600" size={18} />
+                                            <input 
+                                                type="text" 
+                                                value={input}
+                                                onChange={(e) => setInput(e.target.value)}
+                                                onKeyDown={(e) => e.key === 'Enter' && !isLoading && handleSend()}
+                                                disabled={isLoading}
+                                                placeholder={isLoading ? "Waiting..." : "Ask a follow-up question..."} 
+                                                className="flex-1 bg-transparent border-none px-3 py-2 text-sm text-white focus:outline-none placeholder:text-gray-500 disabled:opacity-50 disabled:cursor-wait"
+                                            />
+                                        </div>
+                                        
+                                        {/* Action Buttons */}
+                                        <div className="flex gap-2">
+                                            {isLoading ? (
+                                                <button 
+                                                    onClick={handleStop}
+                                                    className="p-2.5 rounded-lg bg-red-600/80 hover:bg-red-600 text-white transition-all shadow-lg hover:shadow-red-900/20 flex items-center justify-center"
+                                                    title="Stop research"
+                                                >
+                                                    <div className="w-1.5 h-1.5 bg-white rounded" />
+                                                </button>
+                                            ) : (
+                                                <button 
+                                                    onClick={handleSend}
+                                                    disabled={!input.trim()}
+                                                    className="p-2.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-white transition-all shadow-lg hover:shadow-cyan-900/20 flex items-center justify-center"
+                                                    title="Send message"
+                                                >
+                                                    <Send size={16} />
+                                                </button>
+                                            )}
+                                        </div>
                                     </div>
                                  </div>
                              </div>
