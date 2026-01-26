@@ -214,6 +214,18 @@ def rate_limited_call(func, *args, **kwargs):
                     time.sleep(wait_time)
                     continue
                 raise e
+            
+def validate_document_quality(doc: Document) -> bool:
+    """
+    检查文档质量
+    """
+    content = doc.page_content or ""
+    if len(content) < 50:
+        return False
+    if len([c for c in content if c.isalpha()]) < len(content) * 0.5:
+        return False
+    return True
+
 def research_node(state: ResearchState):
     '''
     并行研究节点,负责当前索引子任务
@@ -287,7 +299,8 @@ def research_node(state: ResearchState):
                         "type": item.get('type'),
                     }
                 )
-                new_docs.append(doc)
+                if validate_document_quality(doc):
+                    new_docs.append(doc)
 
             if new_docs:
                 try:

@@ -147,14 +147,17 @@ function SourceCard({ src, idx }) {
         </div>
         
         {/* URL Preview */}
-        <div className="px-3 pb-2 text-[10px] text-gray-600 truncate font-mono group-hover:text-gray-500">
+        <div className="px-3 pb-2 text-[10px] text-gray-600 truncate font-mono group-hover:text-gray-500 break-all whitespace-normal leading-tight">
             {new URL(src.url || 'http://example.com').hostname}
+            <div className='text-[8px] text-gray-700 mt-0.5 break-all'>
+                {src.url?.replace(/^https?:\/\//, '')?.substring(0, 60)}...
+            </div>
         </div>
 
         {/* Snippet */}
-        <div className={`text-xs text-gray-400 leading-relaxed bg-white/2 rounded-b border-t border-cyan-500/10 p-3 ${
+        <div className={`text-xs text-gray-400 leading-relaxed bg-white/2 rounded-b border-t border-cyan-500/10 p-3 max-w-full${
             expanded ? '' : 'line-clamp-2'
-        }`}>
+        } break-words whitespace-normal`}>
             {src.snippet || "暂无摘要"}
         </div>
         

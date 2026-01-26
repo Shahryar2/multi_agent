@@ -111,9 +111,12 @@ function App() {
     eventSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        console.log('📨 SSE Event received:', data);
         
         // Interrupt
         if (data.type === 'interrupt') {
+          console.log('✅ Interrupt! Plan length:', data.plan?.length);  
+          console.log('Plan content:', data.plan);
           eventSource.close();
           setPendingPlan(data.plan || []);
           setIsApprovalOpen(true);
@@ -445,7 +448,7 @@ function App() {
                                                                                                 href={item.url}
                                                                                                 target="_blank"
                                                                                                 rel="noopener noreferrer"
-                                                                                                className="text-sm font-semibold text-gray-100 hover:text-cyan-300 transition-colors flex gap-1 items-start group/link line-clamp-2"
+                                                                                                className="text-sm font-semibold text-gray-100 hover:text-cyan-300 transition-colors flex gap-1 items-start group/link line-clamp-2 break-all"
                                                                                             >
                                                                                                 {item.title}
                                                                                                 <ExternalLink size={12} className="mt-0.5 shrink-0 opacity-40 group-hover/link:opacity-100" />

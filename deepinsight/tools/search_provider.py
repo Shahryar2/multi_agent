@@ -160,7 +160,10 @@ class EnhancedTavilyWrapper:
         results = raw_response.get("results", [])
         for idx, res in enumerate(results):
             content = res.get("content", "").strip()
-            if len(content) < 30:
+            title = res.get("title", "No Title").strip()
+            url = res.get("url", "")
+
+            if len(content) < 50:
                 continue
             
             # 为每个文本关联 2-3 张图片（简单策略：循环分配）

@@ -156,11 +156,16 @@ async def stream_research(thread_id: str):
                      if node_name == "planner" and isinstance(output, dict):
                          if "thought_process" in output:
                              yield f"data: {json.dumps({'thought': output['thought_process']})}\n\n"
-                         if "plan" in output:
+                         if "plan" in output and len(output["plan"]) > 0:
+                             plan = output["plan"]
+                            #  interrupt for plan approval
                              try:
-                                yield f"data: {json.dumps({'plan': output['plan']})}\n\n"
+                                event_data = {'type': 'interrupt', 'plan': plan}
+                                event_json = json.dumps(event_data, ensure_ascii=False)
+                                yield f"data: {event_json}\n\n"
+                                print(f"--- [Stream] ✅ Interrupt sent from on_chain_end ---")
                              except Exception as e:
-                                logger.error(f"Failed to serialize plan data: {e}")
+                                print(f"--- [Stream] ❌ Failed to send interrupt: {e} ---")
                      # Extract search_data from researcher results
                      if node_name == "researcher" and isinstance(output, dict):
                          if "search_data" in output:
@@ -190,18 +195,55 @@ async def stream_research(thread_id: str):
                 
             # Check if interrupted
             snapshot = graph.get_state({"configurable":{"thread_id":thread_id}})
+            # 调试
+            print(f"--- [Stream] Workflow ended. Check interrupt status ---")
+            print(f"--- [Stream] Nextnode: {snapshot.next if snapshot else 'None'} ---")
+            print(f"--- [Stream] Snapshot exists: {snapshot is not None} ---")
+
             if snapshot and snapshot.next:
                 # If we have a 'next' step but loop finished, we probably interrupted.
                 # Check plan
-                plan = snapshot.values.get("plan", [])
+                value = snapshot.values or {}
+                plan = value.get("plan", [])
                 
+                # 调试
+                print(f"--- [Stream] Value keys: {list(value.keys())} ---")
+                print(f"--- [Stream] Plan type: {type(plan)} ---")
+                print(f"--- [Stream] Plan length: {len(plan)} ---")
+                if len(plan) > 0:
+                    print(f"--- [Stream] First plan step: {plan[0]} ---")
+                    print(f"--- [Stream] Plan serializable test... ---")
+                    try:
+                        test_json = json.dumps(plan, ensure_ascii=False)
+                        print(f"--- [Stream] Serialization OK, length: {len(test_json)} ---")
+                    except Exception as e:
+                        print(f"--- [Stream] Serialization FAILED: {e} ---")
+
                 if plan and len(plan) > 0:
-                    # If plan exists and status is pending, maybe asking for approval?
-                    yield f"data: {json.dumps({'type': 'interrupt', 'plan': plan})}\n\n"
+                    try:
+                        event_data = {'type': 'interrupt', 'plan': plan}
+                        event_json = json.dumps(event_data, ensure_ascii=False)
+                        print(f"--- [Stream] Sending interrupt event ({len(event_json)} bytes) ---")
+                        yield f"data: {event_json}\n\n"
+                        print(f"--- [Stream] ✅ Interrupt event sent successfully ---")
+                    except Exception as e:
+                        print(f"--- [Stream] ❌ ERROR sending interrupt: {e} ---")
+                        import traceback
+                        traceback.print_exc()
+                        yield f"data: {json.dumps({'error': f'Interrupt failed: {str(e)}'})}\n\n"
                 else:
-                    yield f"data: {json.dumps({'node': 'workflow_completed'})}\n\n"
+                    print(f"--- [Stream] ❌ Plan is empty or None ---")
+                    yield f"data: {json.dumps({'error': 'Plan is empty', 'values_keys': list(value.keys())})}\n\n"
             else:
-                 yield f"data: {json.dumps({'node':'workflow_completed'})}\n\n"
+                print(f"--- [Stream] Workflow completed normally (no interrupt) ---")
+                yield f"data: {json.dumps({'node':'workflow_completed'})}\n\n"
+
+            #         # If plan exists and status is pending, maybe asking for approval?
+            #         yield f"data: {json.dumps({'type': 'interrupt', 'plan': plan})}\n\n"
+            #     else:
+            #         yield f"data: {json.dumps({'error': 'Planner generated error'})}\n\n"
+            # else:
+            #      yield f"data: {json.dumps({'node':'workflow_completed'})}\n\n"
 
         except Exception as e:
             logger.error(f"Stream error:{e}")

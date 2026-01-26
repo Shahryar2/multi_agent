@@ -25,7 +25,7 @@ def test_real_rag_flow():
     config = {"configurable": {"thread_id": thread_id}}
 
     # 3. 定义真实任务
-    task = "分析2025年诺贝尔物理学奖得主及其主要贡献"
+    task = "给我一份单板滑雪初学指南"
     print(f"\n[Step 1] 启动任务: {task}")
     
     inputs = {
