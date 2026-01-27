@@ -36,10 +36,17 @@ class SearchConfig:
             "max_results": 7,
             "exclude_domains": []
         },
+        "lifestyle":{
+            # 生活方式类
+            "search_depth": "basic",
+            "include_images": True,
+            "max_results": 8,
+            "exclude_domains": []
+        },
         "general":{
             # 通用类
             "search_depth": "basic",
-            "include_images": False,
+            "include_images": True,
             "max_results": 5
         }
     }
@@ -163,7 +170,8 @@ class EnhancedTavilyWrapper:
             title = res.get("title", "No Title").strip()
             url = res.get("url", "")
 
-            if len(content) < 50:
+            if not content or len(content) < 50:
+                logger.debug(f"跳过内容为空或过短的结果: {title}")
                 continue
             
             # 为每个文本关联 2-3 张图片（简单策略：循环分配）
@@ -177,8 +185,8 @@ class EnhancedTavilyWrapper:
             
             item = {
                 "type": "text",
-                "title": res.get("title", "No Title"),
-                "url": res.get("url", ""),
+                "title": title,
+                "url": url,
                 "content": content,
                 "score": res.get("score", 0.0),
                 "related_images": related_images  # 新增字段

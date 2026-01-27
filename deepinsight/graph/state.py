@@ -17,7 +17,7 @@ class ResearchState(TypedDict):
     """
     # 基础输入
     task: str   # 任务描述
-    catagory: str # 任务场景
+    category: str # 任务场景
     field: str # 任务领域
     depth: str # 任务深度
     audience: str # 目标受众

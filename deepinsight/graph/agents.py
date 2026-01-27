@@ -20,7 +20,8 @@ from deepinsight.tools.base import get_tools
 from deepinsight.graph.state import ResearchState
 from deepinsight.tools.search_provider import search_provider
 from deepinsight.utils.normalizers import normalize_data
-from deepinsight.prompts.prompt_demo import CHAT_PROMPT, PLANNER_PROMPT, REACHER_PROMPT, ROUTER_PROMPT,WRITER_PROMPT,REVIEVER_PROMPT, STYLE_ANALYZER_PROMPT
+from deepinsight.prompts.prompt_tool import select_style_preset,get_style_config
+from deepinsight.prompts.prompt_demo import CHAT_PROMPT, PLANNER_PROMPT, REACHER_PROMPT, ROUTER_PROMPT, STYLE_CONFIG,WRITER_PROMPT,REVIEVER_PROMPT, STYLE_ANALYZER_PROMPT
 
 logger = logging.getLogger(__name__)
 api_semaphore = threading.Semaphore(3)
@@ -48,50 +49,58 @@ def router_node(state: ResearchState):
         chain = prompt | llm | StrOutputParser()
 
         logger.info(f"--- [Router] 正在调用LLM进行场景分类... ---")
-        category = rate_limited_call(chain.invoke, {"task": task})
-
-        logger.info(f"Router category: {category}")
-        
-        # Analyze style
-        style_prompt = ChatPromptTemplate.from_messages([
-            ("user", f"{STYLE_ANALYZER_PROMPT}\n\n用户输入: {{task}}")
-        ])
-        style_chain = style_prompt | llm | StrOutputParser()
-
-        logger.info(f"--- [Router] 正在调用LLM进行风格分析... ---")
-        style = rate_limited_call(style_chain.invoke, {"task": task})
-        style = style.strip().strip('"').lower()
-        if style not in ["casual", "story"]:
-            style = "professional"
-        logger.info(f"Router detected style: {style}")
+        response_text = rate_limited_call(chain.invoke, {"task": task})
+        logger.info(f"Router category: {response_text}")
+        # Parse JSON output
+        try:
+            router_output = json.loads(response_text)
+        except:
+            # 容错处理
+            router_output = {
+                "category": "report",
+                "field": "other",
+                "depth": "moderate",
+                "audience_type": "general"
+            }
+        category = router_output.get("category", "report")
+        field = router_output.get("field", "lifestyle")
+        depth = router_output.get("depth", "moderate")
+        audience = router_output.get("audience", "general")
+        # 自主选择风格预设
+        style = select_style_preset({
+            "category": category,
+            "field": field,
+            "depth": depth,
+            "audience": audience,
+            "task": task
+        })
+        style_config = get_style_config(style)
+        logger.info(f"Router detected style: {style_config}")
 
     except Exception as e:
         logger.error(f"Router LLM failed: {e}")
         # Default fallback
         category = "report"
-        style = "professional"
-
-    # Normalize category
-    category = category.strip().strip('"').lower()
+        field = "other"
+        depth = "moderate"
+        audience = "general"
+        style = "tech_deep"
     
     # saved history context
     base_return = {
         "category": category,
+        "field": field,
+        "depth": depth,
+        "audience": audience,
         "style": style,
         "last_draft": state.get("last_draft",""),
         "last_citations": state.get("last_citations",[])
     }
 
-    if "report" in category:
-        return {**base_return,"next": "planner"}
-    if "search" in category:
-        # Fallback search to planner for now as simple_researcher is not wired
-        return {**base_return,"next": "planner"}
-    if "chat" in category:
-        return {**base_return,"next": "chat"}
-    
-    # Default to planner
-    return {**base_return,"next": "planner"}
+    if category == "chat":
+        return {**base_return, "next": "chat"}
+    else:
+        return {**base_return, "next": "planner"}
 
 def planner_node(state: ResearchState):
     """
@@ -108,12 +117,21 @@ def planner_node(state: ResearchState):
     task = state["task"]
     # Fix typo in State definition variable name matches
     category = state.get("category","general")
+    field = state.get("field", "other")
+    depth = state.get("depth", "moderate")
+    audience = state.get("audience", "general")
+    
     review_feedback = state.get("review",{})
     llm = get_llm(model_tag="smart")
 
     if not review_feedback or review_feedback.get("status") == "pass":
-        thought_msg = f"任务 '{task}'确定为新任务，开始拆解初步执行计划...."
-        system_prompt = PLANNER_PROMPT.format(category=category, task=task)
+        thought_msg = f"任务 '{task}'确定为[{category}/{field}]场景，深度[{depth}]，面向[{audience}]，开始拆解初步执行计划...."
+        system_prompt = PLANNER_PROMPT.format(
+            category=category,
+            field=field,
+            depth=depth, 
+            task=task
+        )
         user_input = f"任务：{task}"
     else:
         print(f"---[Planner]收到Review反馈，调整计划{review_feedback}---")
@@ -256,15 +274,17 @@ def research_node(state: ResearchState):
     
     main_task = state.get("task","")
 
-    category = state.get("category","general").lower()
-    config_map = {
-        "chat": "social_media",
-        "social": "social_media",
-        "travel": "travel",
-        "academia": "academic",
-        "report": "general",
-    }
-    search_mode = config_map.get(category, "general")
+    category = state.get("category","report").lower()
+    field = state.get("field","other").lower()
+    search_mode = "general"
+    if category == "chat":
+        search_mode = "social_media"
+    elif category == "guide" and field == "lifestyle":
+        search_mode = "lifestyle"
+    elif category == "news":
+        search_mode = "general"
+    elif category == "report" and field in ["tech","academic"]:
+        search_mode = "academic"
     logger.info(f"---[Researcher]研究类别: {category},搜索模式: {search_mode}---")
     def execute_single_task(task_info):
         sub_task_description = task_info.get("description","")
@@ -291,8 +311,12 @@ def research_node(state: ResearchState):
             new_docs = []
             # 转换为 Langchain Document 对象
             for item in cleaned_results:
+                content = item.get('content')
+                if not content or not isinstance(content, str):
+                    logger.warning(f"跳过无效内容的搜索结果: {item.get('title')}")
+                    continue
                 doc = Document(
-                    page_content=item.get('content'),
+                    page_content=content,
                     metadata={
                         "source": item['url'],
                         "title": item.get('title'),
@@ -342,7 +366,8 @@ def research_node(state: ResearchState):
                     logger.error(f"Researcher总结失败: {e}")
                     step_summary = "本步骤未能生成总结。"
             else:
-                step_summary = "未能搜索到有效信息。"
+                step_summary = f"搜索关键词 '{query}' 未获得有效结果，请尝试调整关键词或搜索策略。"
+                logger.warning(f"子任务未获得有效文档：{query}")
                     
             return {
                 "success": True,
@@ -448,10 +473,13 @@ def writer_node(state: ResearchState):
     }
     """
     task = state["task"]
-    style = state.get("style", "professional")  # Get style
+    style = state.get("style", "tech_deep")  # Get style
     plan = state.get("plan",[])
     documents = state.get("documents", [])
     llm = get_llm(model_tag="smart")
+
+    style_inst = get_style_config(style)
+    logger.info(f"---[Writer]使用风格配置: {style_inst}---")
 
     plan_context = ""
     for step in plan:
@@ -517,7 +545,7 @@ def writer_node(state: ResearchState):
         logger.info(f"---[Writer] 向量库无结果，回退截断 ---")
     
         # 计算占用token
-        plan_tokens = count_tokens(plan_context,model_tag="basic")
+        plan_tokens = count_tokens(plan_context,model_tag="smart")
         print(f"---[Writer] 骨架Tokens:{plan_tokens}---")
 
         MODEL_LIMIT = 30000
@@ -558,15 +586,19 @@ def writer_node(state: ResearchState):
     ])
 
     full_prompt = WRITER_PROMPT.format(
+        persona = style_inst['persona'],
+        structure = style_inst['structure'],
+        standards = style_inst['standards'],
+        format = style_inst['format'],
         task=task, 
-        style=style, 
+        # style=style, 
         plan_context=plan_context, 
         docs_context=docs_context
     )
     
     # Combine messages for compatibility
     messages = [
-        HumanMessage(content=f"你是一个专业的研报撰写专家。\n\n{full_prompt}")
+        HumanMessage(content=full_prompt)
     ]
     
     # Use invoke instead of stream to return the final string for state update
@@ -637,7 +669,7 @@ def reviewer_node(state: ResearchState):
         logger.info(f"[Reviewer] 已达到最大修订次数，强制通过")
         return {"review": {"status": "pass", "reason": "达到最大修订次数"}}
     
-    llm = get_llm(model_tag="basic")
+    llm = get_llm(model_tag="smart")
 
     draft_segment = draft[:10000] if draft else ""
     system_prompt = REVIEVER_PROMPT.format(task=task, draft_segment=draft_segment)
@@ -695,7 +727,7 @@ def chat_node(state: ResearchState):
     last_citations = state.get("last_citations", [])
     messages = state.get("messages", [])
 
-    llm = get_llm(model_tag="basic")
+    llm = get_llm(model_tag="smart")
 
     logger.info(f"--- [Chat] 用户问题：{task[:50]}... ---")
     system_prompt = CHAT_PROMPT
