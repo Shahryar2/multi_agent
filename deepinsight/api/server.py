@@ -16,7 +16,6 @@ from deepinsight.graph.workflow import create_graph
 logger = logging.getLogger(__name__)
 
 # 初始化全局图实例
-# 因为 MemorySaver 是线程安全的内存字典，全局单例即可
 graph = create_graph()
 
 app = FastAPI(
