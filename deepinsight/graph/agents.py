@@ -3,6 +3,7 @@ import random
 import re
 import threading
 import time
+from typing import Any, Dict, List, Tuple
 from langchain_core.documents import Document
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.output_parsers import JsonOutputParser,StrOutputParser
@@ -17,9 +18,10 @@ from deepinsight.tools.vector_store import VectorStore, vector_store
 from deepinsight.utils.summarizer import map_summarize_documents
 from deepinsight.utils.token_utils import count_tokens, term_document
 from deepinsight.tools.base import get_tools
-from deepinsight.graph.state import ResearchState
+from deepinsight.graph.state import DraftState, ResearchState
 from deepinsight.tools.search_provider import search_provider
-from deepinsight.utils.normalizers import normalize_data
+from deepinsight.utils.normalizers import normalize_data, smart_truncate
+from deepinsight.utils.normalizers import select_citations_for_section
 from deepinsight.prompts.prompt_tool import select_style_preset,get_style_config
 from deepinsight.prompts.prompt_demo import CHAT_PROMPT, PLANNER_PROMPT, REACHER_PROMPT, ROUTER_PROMPT, STYLE_CONFIG,WRITER_PROMPT,REVIEVER_PROMPT, STYLE_ANALYZER_PROMPT
 
@@ -166,8 +168,29 @@ def planner_node(state: ResearchState):
     
     try:
         response = llm.invoke(messages)
-        # 手动解析
-        plan = parser.parse(response.content)
+        content = response.content
+        # 正则提取markdown中的Json块
+        json_match = re.search(r"```json\s*(.*?)\s*```", content, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1).strip()
+        else:
+            # 兼容无代码块的情况
+            start_idx = content.find("[")
+            end_idx = content.rfind("]")
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                json_str = content[start_idx:end_idx+1].strip()
+            else:
+                start_idx = content.find("{")
+                end_idx = content.rfind("}")
+                if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                    json_str = content[start_idx:end_idx+1].strip()
+                else:
+                    json_str = content
+        
+        try:
+            plan = json.loads(json_str)
+        except json.JSONDecodeError:
+            plan = parser.parse(json_str)
 
         if not isinstance(plan,list):
             # 兼容 LLM 返回 {"steps": [...]} 或 {"plan": [...]} 的情况
@@ -191,11 +214,21 @@ def planner_node(state: ResearchState):
             "thought_process": thought_msg
         }
     except Exception as e:
-        print(f"---[Planner]解析失败，使用原始任务{e}---")
+        print(f"---[Planner]解析失败，生成兜底分布计划{e}---")
         return {
             "plan": [{
                 "type": "research", 
-                "description":f"针对{task}进行补充搜索",
+                "description":f"{task} - 第一部分：核心概念与背景调研",
+                "status":"pending"
+            },
+            {
+                "type": "research",
+                "description":f"{task} - 第二部分：深度分析与核心内容",
+                "status":"pending"
+            },
+            {
+                "type": "research",
+                "description":f"{task} - 第三部分：总结、建议",
                 "status":"pending"
             }],
             "current_step_index": 0,
@@ -240,8 +273,8 @@ def validate_document_quality(doc: Document) -> bool:
     content = doc.page_content or ""
     if len(content) < 50:
         return False
-    if len([c for c in content if c.isalpha()]) < len(content) * 0.5:
-        return False
+    # if len([c for c in content if c.isalpha()]) < len(content) * 0.5:
+    #     return False
     return True
 
 def research_node(state: ResearchState):
@@ -288,7 +321,8 @@ def research_node(state: ResearchState):
     logger.info(f"---[Researcher]研究类别: {category},搜索模式: {search_mode}---")
     def execute_single_task(task_info):
         sub_task_description = task_info.get("description","")
-        query = f'{main_task} - {sub_task_description}'
+        safe_task = main_task[:20]
+        query = f'{safe_task} - {sub_task_description}'[:200]
         try:
             cleaned_results = rate_limited_call(
                 search_provider.search,
@@ -313,7 +347,7 @@ def research_node(state: ResearchState):
             for item in cleaned_results:
                 content = item.get('content')
                 if not content or not isinstance(content, str):
-                    logger.warning(f"跳过无效内容的搜索结果: {item.get('title')}")
+                    # logger.warning(f"跳过无效内容的搜索结果: {item.get('title')}")
                     continue
                 doc = Document(
                     page_content=content,
@@ -332,6 +366,9 @@ def research_node(state: ResearchState):
                     print(f"[Researcher]已添加 {len(new_docs)} 条文档到向量存储")
                 except Exception as e:
                     logger.error(f"向量存储添加文档失败: {e}")
+            
+            if not new_docs:
+                logger.warning(f"关键词 {query} 原始返回结果数: {len(cleaned_results)}，但无有效文档")
 
             step_summary = ""
             if new_docs:
@@ -454,9 +491,147 @@ def research_node(state: ResearchState):
         "search_data": all_raw_results
     }
 
+
+def calculate_section_token_budget(total_available: int, num_sections: int) -> int:
+    """
+    计算每章节的Token预算
+
+    Args:
+        total_available (int): 总可用Token数
+        num_sections (int): 章节数量
+    """
+    buffer = int(total_available * 0.2)
+    per_section = (total_available - buffer) // max(num_sections, 1)
+    return per_section
+
+def generate_section(
+        section_id: int,
+        plan_step: Dict[str,Any],
+        style_config: Dict,
+        citations: List[dict],
+        llm,
+        all_sections_context: str="",
+        max_tokens: int = 3000
+    )-> Tuple[str,int]: 
+    """
+    生成单个章节
+
+    Args:
+        section_id: 章节号
+        plan_step: 该步骤计划
+        style_config: 写作风格配置
+        citations: 引用文献列表
+        llm: LLM实例
+        all_sections_context: 已生成的章节内容
+        max_tokens: 本章节最大Token数
+    Returns:
+        Tuple[str,int]: 生成的章节内容及使用的Token数
+    """
+    step_description = plan_step.get("description","")
+    step_result = plan_step.get("result","")
+    task = plan_step.get("task","")
+    
+    citations_text = select_citations_for_section(
+        citations,
+        section_topic=step_description,
+        section_result=step_result,
+        max_citations=3,
+        max_snippet_length=150
+    )
+    step_result_short = smart_truncate(step_result, max_length=600)
+    context_short = smart_truncate(all_sections_context, max_length=500)
+    
+    persona = style_config.get("persona","你是一个专业内容撰写者")
+    persona_short = smart_truncate(persona, max_length=100, add_ellipsis=True)
+    
+    target_words = min(500,(max_tokens * 0.15))
+
+    section_prompt = f"""{persona_short}
+
+【任务目标】
+任务：{task}
+当前章节：第 {section_id} 部分 - {step_description}
+
+【核心素材】
+研究结论：{step_result_short}
+
+【参考资料】
+{citations_text}
+
+{f"【前文脉络】{context_short}" if context_short else ""}
+
+【写作要求】
+1. 字数控制在 {target_words} 字以内。
+2. 必须符合上述设定的写作风格（语气、受众）。
+3. 使用 Markdown 格式，引用格式为 [index]。
+4. 直接输出正文，不要包含 "好的" 或标题。
+
+开始写作：
+"""
+    llm = get_llm(model_tag="smart")
+    prompt_tokens = count_tokens(section_prompt, model_tag="smart")
+    logger.info(f"章节 {section_id} 提示词Tokens: {prompt_tokens}, 目标输出Tokens: {max_tokens}")
+
+    messages = [HumanMessage(content=section_prompt)]
+    response = rate_limited_call(llm.invoke,messages)
+    section_content = response.content
+    
+    # 检测并修复截断
+    # section_content = smart_truncate(section_content, 3000)
+    section_content = _fix_truncated_ending(section_content)
+    
+    actual_tokens = count_tokens(section_content, model_tag="smart")
+    logger.info(f"章节 {section_id} 生成完成，使用Tokens: {actual_tokens}")
+
+    return section_content, actual_tokens
+
+
+def _fix_truncated_ending(content: str) -> str:
+    """
+    修复截断结尾
+    """
+    if not content or len(content) < 30:
+        return content
+    incomplete_endings = ['，', '、', '：', '的', '和', '与', '在', '是', '有', '了', '等']
+    last_char = content.rstrip()[-1] if content.rstrip() else ''
+    if last_char in incomplete_endings:
+        last_period = max(
+            content.rfind('。'),
+            content.rfind('！'),
+            content.rfind('.'),
+            content.rfind('？')
+        )
+
+        if last_period > len(content) * 0.6:
+            return content[:last_period + 1]
+        else:
+            return content.rstrip() + "。"
+    return content
+
+
+def merge_sections_to_draft(
+        task: str,
+        sections: List[Dict[str,Any]],
+        citations: List[Dict[str,Any]],
+    ) -> str:
+    """
+    合并章节为完整草稿
+    """
+    draft_parts = [f"# {task}\n\n"]
+    for section in sections:
+        draft_parts.append(
+            f"## {section['title']}\n\n{section['content']}\n\n"
+        )
+
+    citations_footer = "\n\n## 引用列表\n" + "\n".join(
+        f"[{c['index']}] {c['title']} — {c['url']}" for c in citations
+    )
+    return "".join(draft_parts) + citations_footer
+
 def writer_node(state: ResearchState):
     """
-    撰写
+    撰写-优化混合(自主选择全文/分章)
+
     output:
     {
       "draft": str,
@@ -488,8 +663,8 @@ def writer_node(state: ResearchState):
 
     logger.info(f"---[Writer] 正在基于大纲检索向量库 ---")
     retrieved_docs = []
-    seen_ids = set()    # 去重ID
-    rag_success = False
+    seen_ids = set()
+    # rag_success = False
 
     all_step_ids = []
     for step in plan:
@@ -580,52 +755,153 @@ def writer_node(state: ResearchState):
             "full_text": text_content    # 可选(作为前端展示书写过程)
         })
     
+    # 判断是否分章撰写
+    plan_tokens = count_tokens(plan_context,model_tag="smart")
     docs_context = "\n\n".join([
         f"[{c['index']}] Title: {c['title']}\nContent: {c['full_text']}\nSource: {c['url']}" 
         for c in citations
     ])
 
-    full_prompt = WRITER_PROMPT.format(
-        persona = style_inst['persona'],
-        structure = style_inst['structure'],
-        standards = style_inst['standards'],
-        format = style_inst['format'],
-        task=task, 
-        # style=style, 
-        plan_context=plan_context, 
-        docs_context=docs_context
+    docs_tokens = count_tokens(docs_context,model_tag="smart")
+    SYSTEM_PROMPT_TOKENS = 2000
+    estimated_total_tokens = plan_tokens + docs_tokens + SYSTEM_PROMPT_TOKENS
+    logger.info(f"-- [Writer] 预估总tokens消耗为 {estimated_total_tokens} --")
+
+    MODEL_CONTEXT_LIMIT = 32000
+    INTEGRATED_WRITING_LIMIT = 4000
+    
+    # TOKEN_THRESHOLD = 6000
+    # 补全条件：预估Token超限，或大纲步骤过多，或历史标记为长文档
+    use_sectional_writing = (
+        estimated_total_tokens > INTEGRATED_WRITING_LIMIT or
+        len(plan) >=3 or
+        state.get("is_long_document", False)
     )
     
-    # Combine messages for compatibility
-    messages = [
-        HumanMessage(content=full_prompt)
-    ]
-    
-    # Use invoke instead of stream to return the final string for state update
-    # The server will handle streaming via astream_events or separate callback if needed
-    try:
-        response = llm.invoke(messages)
-        final_draft = response.content
-        
-        # Append citations
-        citations_footer = "\n\n## 引用列表\n" + "\n".join(
-            f"[{c['index']}] {c['title']} — {c['url']}" for c in citations
+    if use_sectional_writing:
+        logger.info(f"---[Writer] 切换到分章节写作方式 ---")
+        draft_sections: List[DraftState] = []
+        total_output_tokens = 0
+        accumulated_content = ""
+        MAX_OUTPUT_TOKENS = 3000
+
+        # 计算每个章节token预算
+        availble_for_sections = MODEL_CONTEXT_LIMIT - SYSTEM_PROMPT_TOKENS
+        per_section_buget = calculate_section_token_budget(
+            total_available=availble_for_sections,
+            num_sections=len(plan),
         )
+        if per_section_buget > MAX_OUTPUT_TOKENS:
+            per_section_buget = MAX_OUTPUT_TOKENS
+
+        logger.warning(f"-- [Writer] 每个章节 Token 预算为 {per_section_buget} --")
+
+        for i,step in enumerate(plan):
+            logger.info(f"---[Writer] 正在生成章节 {i+1}: {step.get('description','章节')} ---")
+            section_content, section_tokens = generate_section(
+                section_id=i + 1,
+                plan_step={**step,"task": task},
+                style_config=style_inst,
+                citations=citations,
+                llm=llm,
+                all_sections_context=accumulated_content,
+                max_tokens=per_section_buget
+            )
+            section: DraftState = {
+                "section_id": i + 1,
+                "title": step.get("description",f'第 {i+1} 章节'),
+                "content": section_content,
+                "source_step_id":step.get("id",i) ,
+                "token_count": section_tokens,
+                "status": "draft",
+                "edit_history": []
+            }
+
+            draft_sections.append(section)
+            # 累计内容用于后续章节的上下文
+            accumulated_content += f"\n### {step.get('description',f'第 {i+1} 章节')}\n{section_content}\n"
+            total_output_tokens += section_tokens
+        
+        # 合并章节为最终草稿
+        final_draft = merge_sections_to_draft(
+            task=task,
+            sections=draft_sections,
+            citations=citations
+        )
+        logger.info(f"---[Writer] 全文合并完成，累计输出Tokens: {total_output_tokens} ---")
         return {
-            "draft": final_draft + citations_footer, 
+            "draft": final_draft, 
             "citations": citations,
             # 保存上下文
             "last_draft": final_draft,
-            "last_citations": citations
+            "last_citations": citations,
+            "draft_sections": draft_sections,
+            "writing_mode": "sectional",
+            "writing_progress": len(draft_sections),
+            "is_long_document": True,
+            "token_stats": {
+                "total_output_tokens": total_output_tokens,
+                "estimated_total_tokens": estimated_total_tokens,
+                "writing_mode": "sectional"
+            }
         }
-    except Exception as e:
-        logger.error(f"Writer LLM failed: {e}")
-        return {
-            "draft": "生成报告失败。", 
-            "citations": [],
-            "last_draft": "",
-            "last_citations": []
-        }
+    else:
+        # 整体生成
+        full_prompt = WRITER_PROMPT.format(
+            persona = style_inst['persona'],
+            structure = style_inst['structure'],
+            standards = style_inst['standards'],
+            format = style_inst['format'],
+            task=task, 
+            # style=style, 
+            plan_context=plan_context, 
+            docs_context=docs_context
+        )
+    
+        # Combine messages for compatibility
+        messages = [
+            HumanMessage(content=full_prompt)
+        ]
+    
+        # Use invoke instead of stream to return the final string for state update
+        # The server will handle streaming via astream_events or separate callback if needed
+        try:
+            response = llm.invoke(messages)
+            final_draft = response.content
+            
+            # Append citations
+            citations_footer = "\n\n## 引用列表\n" + "\n".join(
+                f"[{c['index']}] {c['title']} — {c['url']}" for c in citations
+            )
+            return {
+                "draft": final_draft + citations_footer, 
+                "citations": citations,
+                # 保存上下文
+                "last_draft": final_draft,
+                "last_citations": citations,
+                "draft_sections": None,
+                "writing_mode": "integrated",
+                "writing_progress": 1,
+                "is_long_document": False,
+                "token_stats": {
+                    "total_output_tokens": count_tokens(final_draft),
+                    "estimated_total_tokens": estimated_total_tokens,
+                    "writing_mode": "integrated"
+                }
+            }
+        except Exception as e:
+            logger.error(f"Writer LLM failed: {e}")
+            return {
+                "draft": "生成报告失败。", 
+                "citations": [],
+                "last_draft": "",
+                "last_citations": [],
+                "draft_sections": None,
+                "writing_mode": "integrated",
+                "writing_progress": 0,
+                "is_long_document": True,
+                "token_stats": None,
+            }
     
 def verifier_node(state: ResearchState):
     """

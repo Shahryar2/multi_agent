@@ -11,6 +11,18 @@ class SubTask(TypedDict):
     status:str  # pending, completed
     result:str
 
+class DraftState(TypedDict):
+    """
+    章节草稿状态
+    """
+    section_id: int  # 章节编号
+    title: str  # 章节标题
+    content: str  # 章节内容
+    source_step_id: int  # 生成该章节的任务步骤ID
+    token_count: int  # 章节内容的Token数量
+    status: str  
+    edit_history: List[Dict[str, Any]]  # 编辑历史记录(可选)
+
 class ResearchState(TypedDict):
     """
     系统的核心状态
@@ -26,8 +38,14 @@ class ResearchState(TypedDict):
     # 研究流程相关
     plan: List[SubTask] # 任务步骤列表
     documents: Annotated[List[Dict[str, Any]], operator.add]    # 已收集文档
-    draft: str  # 初稿
+    draft: str  # 合并草稿
     citations: List[Dict[str, Any]]  # 引用文献
+
+    # 分章节相关
+    draft_sections: List[DraftState]  # 章节草稿状态
+    writing_mode: str  # 写作模式
+    writing_progress: int  # 章节数
+    is_long_document: bool  # 是否为长文档
 
     # 修订相关
     revision_number: int    # 当前修订版本

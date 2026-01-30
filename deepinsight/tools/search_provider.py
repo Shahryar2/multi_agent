@@ -3,6 +3,7 @@ import json
 import os
 from typing import List, Dict, Any,Optional
 from langchain_community.tools.tavily_search.tool import TavilySearchResults
+from deepinsight.utils.normalizers import compress_search_results
 from tavily import TavilyClient
 
 logger = logging.getLogger(__name__)
@@ -104,7 +105,12 @@ class EnhancedTavilyWrapper:
             )
             # 数据清洗与融合
             cleaned_results = self._process_results(response, include_images=params.get("include_images", False))
-            
+            cleaned_results = compress_search_results(
+                cleaned_results,
+                max_per_item=500,
+                min_length = 50,
+                min_score= 0.3
+            )
             logger.info(f"--- [Search Log] Success: Processed {len(cleaned_results)} items ---")
             return cleaned_results
         except Exception as e:

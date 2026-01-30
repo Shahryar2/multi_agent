@@ -22,3 +22,5 @@ frontend/.vite/
 checkpoints.sqlite
 chroma_data/
 .env
+
+image/
