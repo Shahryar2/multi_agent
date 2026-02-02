@@ -107,9 +107,9 @@ class EnhancedTavilyWrapper:
             cleaned_results = self._process_results(response, include_images=params.get("include_images", False))
             cleaned_results = compress_search_results(
                 cleaned_results,
-                max_per_item=500,
-                min_length = 50,
-                min_score= 0.3
+                max_per_item=1500,
+                min_length = 30,
+                min_score= 0.0
             )
             logger.info(f"--- [Search Log] Success: Processed {len(cleaned_results)} items ---")
             return cleaned_results

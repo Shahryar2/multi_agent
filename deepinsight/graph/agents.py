@@ -8,6 +8,7 @@ from langchain_core.documents import Document
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.output_parsers import JsonOutputParser,StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import PromptTemplate
 from langchain_tavily import TavilySearch
 from langchain_community.tools.tavily_search import TavilySearchResults
 # from langchain_tavily import TavilySearchResults
@@ -277,6 +278,37 @@ def validate_document_quality(doc: Document) -> bool:
     #     return False
     return True
 
+def generate_optimized_query(main_task: str, sub_task_desc: str) -> str:
+    """
+    任务描述 -> 精准搜索引擎关键词
+    """
+    llm = get_llm(model_tag="smart")
+    prompt = PromptTemplate.from_template(
+    """你是一个专业的搜索引擎优化专家。你的任务是根据用户的【总任务】和当前的【子步骤】，生成一个最适合在 Google/Bing 搜索的关键词。
+
+    【总任务】：{main_task}
+    【子步骤】：{sub_task_desc}
+
+    要求：
+    1. 仅输出一个最核心的搜索关键词（或短语）。
+    2. 去除所有指令性词语（如"给我一份"、"去搜索"、"分析"、"整理"）。
+    3. 关键词长度控制在 3-5 个词以内。
+    4. 优先保留实体（地点、人名、事件）和核心意图。
+    5. 不要输出 JSON，不要输出解释，直接输出关键词。
+
+    搜索关键词："""
+)
+    chain = prompt | llm | StrOutputParser()
+    try:
+        query = chain.invoke({
+            "main_task": main_task,
+            "sub_task_desc": sub_task_desc
+        })
+        return query.strip().replace('"','').replace("'",'').replace('\n',' ')
+    except Exception as e:
+        return f"{main_task[:10]} {sub_task_desc[:10]}"
+
+
 def research_node(state: ResearchState):
     '''
     并行研究节点,负责当前索引子任务
@@ -321,8 +353,15 @@ def research_node(state: ResearchState):
     logger.info(f"---[Researcher]研究类别: {category},搜索模式: {search_mode}---")
     def execute_single_task(task_info):
         sub_task_description = task_info.get("description","")
-        safe_task = main_task[:20]
-        query = f'{safe_task} - {sub_task_description}'[:200]
+        # step_keyword = sub_task_description.split('：')[0].split(':')[0]
+        # main_keyword = main_task[:15]
+
+        # query = f'{main_keyword} {step_keyword}'
+        # if len(query) < 5:
+        #     query = sub_task_description[:50]
+        logger.info(f"正在生成搜索词...(主：{main_task[:10]}... 子：{sub_task_description[:10]}...)")
+        query = generate_optimized_query(main_task= main_task,sub_task_desc= sub_task_description)
+        logger.info(f"--- [Researcher] 优化后的搜索词 [{query}]---")
         try:
             cleaned_results = rate_limited_call(
                 search_provider.search,
@@ -342,6 +381,16 @@ def research_node(state: ResearchState):
                 ...
             ]
             """
+            if not cleaned_results:
+                logger.warning(f"优化关键词 [{query}] 失败，无搜索结果...")
+                fallback_query = f"{main_task[:15]} {sub_task_description[:20]}"
+                cleaned_results = rate_limited_call(
+                    search_provider.search,
+                    query=fallback_query,
+                    config_name=search_mode
+                )
+                logger.info(f"兜底搜索 关键词 [{fallback_query}] 获得 {len(cleaned_results)} 条结果...")
+
             new_docs = []
             # 转换为 Langchain Document 对象
             for item in cleaned_results:
@@ -363,7 +412,7 @@ def research_node(state: ResearchState):
             if new_docs:
                 try:
                     vector_store.add_documents(new_docs)
-                    print(f"[Researcher]已添加 {len(new_docs)} 条文档到向量存储")
+                    # print(f"[Researcher]已添加 {len(new_docs)} 条文档到向量存储")
                 except Exception as e:
                     logger.error(f"向量存储添加文档失败: {e}")
             

@@ -233,7 +233,7 @@ class ContentCompressor:
         # 过滤过短内容
         segments = [
             s for s in segments
-            if len(s.get("text","")) >= self.min_content_length
+            if len(s.get("text","")) or len(s.get("content","")) >= self.min_content_length
         ]
         # 去重
         if self.remove_duplicates:
@@ -249,7 +249,11 @@ class ContentCompressor:
         # 按分数排序
         segments.sort(key=lambda x: x.get("quality_score",0), reverse=True)
         # 智能截断
-        segments = [smart_truncate(seg.get("text",""), self.max_content_length) for seg in segments]
+        for seg in segments:
+            original_text = seg.get("text","") or seg.get("content","")
+            seg["text"] = smart_truncate(original_text, self.max_content_length)
+            if "content" in seg:
+                seg["content"] = seg["text"]
         logger.info(
             f"[Compressor] {original_count} -> {len(segments)} 条，压缩率 {(1 - len(segments)/max(original_count,1))*100:.1f}%"
         )
@@ -260,7 +264,7 @@ class ContentCompressor:
     def _deep_clean(self, segment: Dict[str,Any]) -> Dict[str,Any]:
         """深度清洗，移除噪音内容"""
         segment = segment.copy()
-        text = segment.get("text","")
+        text = segment.get("text","") or segment.get("content","")
         # 简单清洗
         text = clean_text(text)
         
@@ -271,6 +275,8 @@ class ContentCompressor:
         # 清理多余空白
         text = re.sub(r'\s+', ' ', text).strip()
         segment["text"] = text
+        if "content" in segment:
+            segment["content"] = text
 
         return segment
     
@@ -285,7 +291,7 @@ class ContentCompressor:
         
         for seg in segments:
             url = seg.get("url","")
-            text = seg.get("text","")
+            text = seg.get("text","") or seg.get("content","")
 
             if url and url in seen_urls:
                 continue
@@ -313,7 +319,7 @@ class ContentCompressor:
         简单质量评分
         """
         segment = segment.copy()
-        text = segment.get("text","")
+        text = segment.get("text","") or segment.get("content","")
 
         if not text:
             segment["quality_score"] = 0.0
