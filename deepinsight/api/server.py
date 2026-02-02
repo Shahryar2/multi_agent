@@ -93,7 +93,12 @@ async def start_research(request: ResearchRequest):
         "plan": [],
         "current_step_index": 0,
         "documents": [],
-        "bg_investigation": []
+        "bg_investigation": [],
+        "max_revisions": 2,
+        "revision_number": 0,
+        "is_long_document": False,
+        "writing_mode":"",
+        "draft_sections": []
     }
     
     PENDING_TASKS[thread_id] = initial_state
@@ -150,6 +155,15 @@ async def stream_research(thread_id: str):
                 elif kind == "on_chain_end":
                      node_name = event.get("name")
                      output = event.get("data", {}).get("output")
+
+                     if node_name == "router" and isinstance(output, dict):
+                         classification = {
+                             "category": output.get("category"),
+                             "field": output.get("field"),
+                             "depth": output.get("depth"),
+                             "style": output.get("style"), 
+                         }
+                         yield f"data: {json.dumps({'classification': classification})}\n\n"
                      
                      # Extract thought_process from planner results
                      if node_name == "planner" and isinstance(output, dict):
@@ -175,6 +189,20 @@ async def stream_research(thread_id: str):
                                  logger.error(f"Failed to serialize search data: {e}")
 
                      if node_name == "writer" and isinstance(output, dict):
+                         if "draft_sections" in output and output["draft_sections"]:
+                             try:
+                                sections_summary = [
+                                    {"id": sec["section_id"],"title": sec["title"],"status": sec["status"]}
+                                    for sec in output["draft_sections"]
+                                ]
+                                yield f"data: {json.dumps({'draft_sections': sections_summary})}\n\n"
+                             except Exception as e:
+                                 logger.error(f"Failed to serialize draft sections: {e}")
+                         if "writing_mode" in output:
+                             yield f"data: {json.dumps({'writing_mode': output['writing_mode']})}\n\n"
+                         if "token_stats" in output:
+                             yield f"data: {json.dumps({'token_stats': output['token_stats']})}\n\n"
+
                          if "citations" in output:
                              try:
                                 yield f"data: {json.dumps({'citations': output['citations']})}\n\n"
