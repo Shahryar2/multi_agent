@@ -77,3 +77,10 @@ export async function approvePlan(threadId, plan) {
   if (!response.ok) throw new Error("Failed to approve plan");
   return response.json();
 }
+
+
+export async function getTaskState(threadId) {
+  const response = await fetch(`${API_BASE}/research/${threadId}/state`);
+  if (!response.ok) throw new Error("Failed to fetch task state");
+  return response.json();
+}

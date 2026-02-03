@@ -5,7 +5,7 @@ import { Send, LogIn, UserCircle, Bot, Activity, Clock, Search, ChevronRight, Lo
 import { ReferenceSidebar } from './components/ReferenceSidebar';
 import { ApprovalModal } from './components/ApprovalModal';
 import { LoginModal } from './components/LoginModal';
-import { startTask, stopTask, approvePlan, syncHistory, getHistory, API_BASE } from './lib/api';
+import { getTaskState, startTask, stopTask, approvePlan, syncHistory, getHistory, API_BASE } from './lib/api';
 
 function App() {
   const [user, setUser] = useState(() => {
@@ -25,16 +25,69 @@ function App() {
   const [sources, setSources] = useState([]);
   const [logs, setLogs] = useState([]);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+
+  // Approval State
+  const [isApprovalOpen, setIsApprovalOpen] = useState(false);
+  const [pendingPlan, setPendingPlan] = useState([]);
+  const [activeThreadId, setActiveThreadId] = useState(() => localStorage.getItem('di_thread_id'));  
   
   // Persist messages
   useEffect(() => {
     localStorage.setItem('di_messages', JSON.stringify(messages));
   }, [messages]);
 
-  // Approval State
-  const [isApprovalOpen, setIsApprovalOpen] = useState(false);
-  const [pendingPlan, setPendingPlan] = useState([]);
-  const [activeThreadId, setActiveThreadId] = useState(() => localStorage.getItem('di_thread_id'));
+  useEffect(() => {
+    async function restoreSession() {
+      if (!activeThreadId) return;
+
+      try {
+        console.log("正在恢复会话状态:", activeThreadId);
+        const stateData = await getTaskState(activeThreadId);
+        
+        if (stateData && stateData.values) {
+          const { documents, citations } = stateData.values;
+          
+          // 1. 恢复资料库 (Reference Library)
+          // 后端 documents 可能包含很多字段，这里做一下去重和格式化
+          if (documents && Array.isArray(documents)) {
+            const uniqueDocs = [];
+            const seenUrls = new Set();
+            
+            documents.forEach(doc => {
+              // 兼容不同的数据结构 (state.py 里可能是 dict 也可能是 object)
+              const url = doc.url || doc.metadata?.source;
+              const title = doc.title || doc.metadata?.title || "未知文档";
+              
+              if (url && !seenUrls.has(url)) {
+                seenUrls.add(url);
+                uniqueDocs.push({
+                  title: title,
+                  url: url,
+                  type: 'website' // 或根据 doc.type 判断
+                });
+              }
+            });
+            
+            if (uniqueDocs.length > 0) {
+              setSources(uniqueDocs);
+              console.log("已恢复资料库:", uniqueDocs.length, "条");
+            }
+          }
+          
+          // 2. 如果需要，也可以恢复待批准的计划 (Fix: 刷新后批准弹窗消失的问题)
+          if (stateData.values.plan && stateData.values.plan.length > 0) {
+             // 简单的逻辑：如果最新状态还有 pending 的计划，可能需要恢复弹窗
+             // 但通常比较复杂，这里先只解决资料库
+          }
+        }
+      } catch (err) {
+        console.warn("无法恢复历史状态 (可能是新任务):", err);
+      }
+    }
+
+    restoreSession();
+  }, [activeThreadId]); // 依赖项：当 activeThreadId 变化时执行  
+    
 
   useEffect(() => {
     if(activeThreadId) localStorage.setItem('di_thread_id', activeThreadId);
