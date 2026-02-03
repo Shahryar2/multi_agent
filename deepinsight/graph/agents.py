@@ -23,6 +23,7 @@ from deepinsight.graph.state import DraftState, ResearchState
 from deepinsight.tools.search_provider import search_provider
 from deepinsight.utils.normalizers import normalize_data, smart_truncate
 from deepinsight.utils.normalizers import select_citations_for_section
+from deepinsight.utils.global_state import CANCELLED_TASKS
 from deepinsight.prompts.prompt_tool import select_style_preset,get_style_config
 from deepinsight.prompts.prompt_demo import CHAT_PROMPT, PLANNER_PROMPT, REACHER_PROMPT, ROUTER_PROMPT, STYLE_CONFIG,WRITER_PROMPT,REVIEVER_PROMPT, STYLE_ANALYZER_PROMPT
 
@@ -323,6 +324,12 @@ def research_node(state: ResearchState):
      "bg_investigation": [...]
     }
     '''
+    thread_id = state.get("thread_id")
+    # 任务取消检查 -- 节点开始前
+    if thread_id and thread_id in CANCELLED_TASKS:
+        logger.info(f"---[Researcher] 任务线程 {thread_id} 已取消，跳过研究节点 ---")
+        return {"current_step_index": len(state.get("plan", []))}
+    
     plan = state.get("plan", [])
 
     # 并行任务实现
@@ -351,7 +358,21 @@ def research_node(state: ResearchState):
     elif category == "report" and field in ["tech","academic"]:
         search_mode = "academic"
     logger.info(f"---[Researcher]研究类别: {category},搜索模式: {search_mode}---")
+
+    # 任务取消检查 -- 并行子任务开始前
+    if thread_id and thread_id in CANCELLED_TASKS:
+        logger.info(f"---[Researcher] 任务线程 {thread_id} 已取消，跳过研究节点 ---")
+        return {"current_step_index": len(state.get("plan", []))}
+
     def execute_single_task(task_info):
+        # 任务取消检查 -- 子任务开始前
+        if thread_id and thread_id in CANCELLED_TASKS:
+            logger.info(f"---[Researcher] 任务线程 {thread_id} 已取消，跳过子任务 ---")
+            return {
+                "success": False,
+                "error": "Task Cancelled"
+            }
+
         sub_task_description = task_info.get("description","")
         # step_keyword = sub_task_description.split('：')[0].split(':')[0]
         # main_keyword = main_task[:15]
@@ -360,8 +381,24 @@ def research_node(state: ResearchState):
         # if len(query) < 5:
         #     query = sub_task_description[:50]
         logger.info(f"正在生成搜索词...(主：{main_task[:10]}... 子：{sub_task_description[:10]}...)")
+        # 任务取消检查 -- 生成搜索词前
+        if thread_id and thread_id in CANCELLED_TASKS:
+            return {
+                "success": False,
+                "error": "Task Cancelled"
+            }
+
         query = generate_optimized_query(main_task= main_task,sub_task_desc= sub_task_description)
         logger.info(f"--- [Researcher] 优化后的搜索词 [{query}]---")
+        
+        # 任务取消检查 -- 搜索前
+        if thread_id and thread_id in CANCELLED_TASKS:
+            return {
+                "success": False,
+                "error": "Task Cancelled"
+            }
+
+        # 调用搜索工具
         try:
             cleaned_results = rate_limited_call(
                 search_provider.search,
@@ -381,6 +418,13 @@ def research_node(state: ResearchState):
                 ...
             ]
             """
+            # 任务取消检查 -- 写入向量库前
+            if thread_id and thread_id in CANCELLED_TASKS:
+                return {
+                    "success": False,
+                    "error": "Task Cancelled"
+                }
+
             if not cleaned_results:
                 logger.warning(f"优化关键词 [{query}] 失败，无搜索结果...")
                 fallback_query = f"{main_task[:15]} {sub_task_description[:20]}"
@@ -421,6 +465,13 @@ def research_node(state: ResearchState):
 
             step_summary = ""
             if new_docs:
+                # 任务取消检查 -- 总结前
+                if thread_id and thread_id in CANCELLED_TASKS:
+                    return {
+                        "success": False,
+                        "error": "Task Cancelled"
+                    }
+
                 llm = get_llm(model_tag="smart")
                 text_only_docs = [d for d in new_docs if d.metadata.get("type") == "text"]
                 docs_to_summarize = text_only_docs if text_only_docs else new_docs
@@ -477,6 +528,13 @@ def research_node(state: ResearchState):
             for idx, task in zip(pending_indices, pending_tasks)
         }
         for future in as_completed(future_to_index):
+            # 任务取消检查 -- 子任务结果收集前
+            if thread_id and thread_id in CANCELLED_TASKS:
+                logger.info(f"---[Researcher] 任务主线程 {thread_id} 已取消，正在丢弃剩余任务 ---")
+                executor.shutdown(wait=False,cancel_futures=True)
+
+                return {"current_step_index": len(state.get("plan", []))}
+
             idx = future_to_index[future]
             try:
                 res = future.result()

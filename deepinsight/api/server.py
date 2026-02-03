@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from deepinsight.api.user_db import register_user, login_user, save_history, get_histories
+from deepinsight.utils.global_state import CANCELLED_TASKS
 
 # 直接使用同步的 create_graph，因为它内部已经配置了 MemorySaver
 from deepinsight.graph.workflow import create_graph
@@ -37,7 +38,7 @@ app.add_middleware(
 PENDING_TASKS: Dict[str, Dict[str, Any]] = {}
 
 # 跟踪取消任务
-CANCELLED_TASKS: set = set()
+# CANCELLED_TASKS = set()
 
 # --- Data Models ---
 class ResearchRequest(BaseModel):

@@ -34,6 +34,7 @@ class ResearchState(TypedDict):
     depth: str # 任务深度
     audience: str # 目标受众
     style: str # 写作风格
+    thread_id: str  # 任务线程ID
 
     # 研究流程相关
     plan: List[SubTask] # 任务步骤列表
