@@ -59,6 +59,15 @@ export async function startTask(query, userId) {
   return response.json();
 }
 
+export async function stopTask(threadId) {
+  const response = await fetch(`${API_BASE}/research/${threadId}/stop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!response.ok) throw new Error("Failed to stop task");
+  return response.json();
+}
+
 export async function approvePlan(threadId, plan) {
   const response = await fetch(`${API_BASE}/research/approve`, {
     method: "POST",

@@ -5,7 +5,7 @@ import { Send, LogIn, UserCircle, Bot, Activity, Clock, Search, ChevronRight, Lo
 import { ReferenceSidebar } from './components/ReferenceSidebar';
 import { ApprovalModal } from './components/ApprovalModal';
 import { LoginModal } from './components/LoginModal';
-import { startTask, approvePlan, syncHistory, getHistory, API_BASE } from './lib/api';
+import { startTask, stopTask, approvePlan, syncHistory, getHistory, API_BASE } from './lib/api';
 
 function App() {
   const [user, setUser] = useState(() => {
@@ -115,8 +115,12 @@ function App() {
         
         // Interrupt
         if (data.type === 'interrupt') {
-          console.log('✅ Interrupt! Plan length:', data.plan?.length);  
-          console.log('Plan content:', data.plan);
+          // --- 专门针对 interrupt 事件的详细日志 ---
+          console.log('✅ INTERRUPT event detected!');
+          console.log('Plan data received:', data.plan);
+          console.log('Is plan an array?', Array.isArray(data.plan));
+          console.log('Plan length:', data.plan ? data.plan.length : 'undefined');
+          
           eventSource.close();
           setPendingPlan(data.plan || []);
           setIsApprovalOpen(true);
@@ -211,13 +215,23 @@ function App() {
     };
   };
 
-  const handleStop = () => {
+  const handleStop = async () => {
     if (window.currentEventSource) {
         window.currentEventSource.close();
         window.currentEventSource = null;
-        setIsLoading(false);
-        addLog("Task stopped by user.");
     }
+
+    if (activeThreadId) {
+        try {
+            await stopTask(activeThreadId);
+            addLog("Stop request sent to server.");
+        }catch (err) {
+            console.error("Failed to stop task:", err);
+            addLog("Failed to send stop request to server.");
+        }
+    }
+    setIsLoading(false);
+    addLog("Task stopped Locally.");
   };
 
   const handleApprove = async () => {

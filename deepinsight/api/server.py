@@ -36,6 +36,9 @@ app.add_middleware(
 # In-memory store for pending tasks
 PENDING_TASKS: Dict[str, Dict[str, Any]] = {}
 
+# 跟踪取消任务
+CANCELLED_TASKS: set = set()
+
 # --- Data Models ---
 class ResearchRequest(BaseModel):
     query: str
@@ -106,12 +109,23 @@ async def start_research(request: ResearchRequest):
     
     return {"thread_id": thread_id, "status": "created"}
 
+@app.post("/research/{thread_id}/stop")
+async def stop_research(thread_id: str):
+    """
+    Stop a running research session.
+    """
+    CANCELLED_TASKS.add(thread_id)
+    print(f"--- [API] Task Cancel Requested: {thread_id} ---")
+    return {"thread_id": thread_id, "status": "cancellation_requested"}
+
+
 @app.get("/research/{thread_id}/stream")
 async def stream_research(thread_id: str):
     """
     Stream updates using astream_events (v2) for granular tokens
     """
     async def event_generator():
+        interrupt_sent = False
         try:
             # Determine input. If first run, use PENDING_TASKS. If resume, use None.
             # But graph state might be empty if we rely only on PENDING_TASKS without initial injection.
@@ -131,6 +145,12 @@ async def stream_research(thread_id: str):
                 config={"configurable":{"thread_id":thread_id}},
                 version="v2"
             ):
+                if thread_id in CANCELLED_TASKS:
+                    print(f"--- Task {thread_id} cancelled ---")
+                    CANCELLED_TASKS.discard(thread_id)
+                    yield f"data: {json.dumps({'node':'cancelled'})}\n\n"
+                    return
+
                 kind = event["event"]
                 
                 # 1. LLM Token Streaming
@@ -169,16 +189,20 @@ async def stream_research(thread_id: str):
                      if node_name == "planner" and isinstance(output, dict):
                          if "thought_process" in output:
                              yield f"data: {json.dumps({'thought': output['thought_process']})}\n\n"
-                         if "plan" in output and len(output["plan"]) > 0:
+
+                         if not interrupt_sent and "plan" in output and len(output["plan"]) > 0:
                              plan = output["plan"]
                             #  interrupt for plan approval
                              try:
                                 event_data = {'type': 'interrupt', 'plan': plan}
                                 event_json = json.dumps(event_data, ensure_ascii=False)
                                 yield f"data: {event_json}\n\n"
+                                # 设置标志位
+                                interrupt_sent = True
                                 print(f"--- [Stream] ✅ Interrupt sent from on_chain_end ---")
                              except Exception as e:
                                 print(f"--- [Stream] ❌ Failed to send interrupt: {e} ---")
+
                      # Extract search_data from researcher results
                      if node_name == "researcher" and isinstance(output, dict):
                          if "search_data" in output:
@@ -227,7 +251,7 @@ async def stream_research(thread_id: str):
             print(f"--- [Stream] Nextnode: {snapshot.next if snapshot else 'None'} ---")
             print(f"--- [Stream] Snapshot exists: {snapshot is not None} ---")
 
-            if snapshot and snapshot.next:
+            if snapshot and snapshot.next and not interrupt_sent:
                 # If we have a 'next' step but loop finished, we probably interrupted.
                 # Check plan
                 value = snapshot.values or {}
@@ -258,6 +282,9 @@ async def stream_research(thread_id: str):
                         import traceback
                         traceback.print_exc()
                         yield f"data: {json.dumps({'error': f'Interrupt failed: {str(e)}'})}\n\n"
+
+                # elif interrupt_sent:
+                #     print(f"--- [Stream] ✅ Interrupt was already sent earlier ---")
                 else:
                     print(f"--- [Stream] ❌ Plan is empty or None ---")
                     yield f"data: {json.dumps({'error': 'Plan is empty', 'values_keys': list(value.keys())})}\n\n"
