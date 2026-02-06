@@ -1,3 +1,4 @@
+import hashlib
 import json
 import random
 import re
@@ -16,12 +17,12 @@ from deepinsight.core.llm import get_llm
 import logging
 from concurrent.futures import ThreadPoolExecutor,as_completed
 from deepinsight.tools.vector_store import VectorStore, vector_store
-from deepinsight.utils.summarizer import map_summarize_documents
+from deepinsight.utils.summarizer import find_matching_section
 from deepinsight.utils.token_utils import count_tokens, term_document
 from deepinsight.tools.base import get_tools
 from deepinsight.graph.state import DraftState, ResearchState
 from deepinsight.tools.search_provider import search_provider
-from deepinsight.utils.normalizers import normalize_data, smart_truncate
+from deepinsight.utils.normalizers import smart_truncate,remap_citations,smart_truncate_draft
 from deepinsight.utils.normalizers import select_citations_for_section
 from deepinsight.utils.global_state import CANCELLED_TASKS
 from deepinsight.prompts.prompt_tool import select_style_preset,get_style_config
@@ -106,6 +107,15 @@ def router_node(state: ResearchState):
     else:
         return {**base_return, "next": "planner"}
 
+
+def generate_step_id(topic: str, index: int) -> str:
+    """
+    基于 topic 和位置生成稳定 ID
+    """
+    content = f"{topic}_{index}"
+    return hashlib.md5(content.encode('utf-8')).hexdigest()
+
+
 def planner_node(state: ResearchState):
     """
     拆解任务
@@ -126,7 +136,15 @@ def planner_node(state: ResearchState):
     audience = state.get("audience", "general")
     
     review_feedback = state.get("review",{})
+    current_plan = state.get("plan",[]) 
     llm = get_llm(model_tag="smart")
+
+    simplified_old_plan = [
+        {"id": step.get("id"), "topic": step.get("topic"), "description": step.get("description"), "status": step.get("status")}
+        for step in current_plan
+    ]
+    current_plan_str = json.dumps(simplified_old_plan, ensure_ascii=False, indent=2)
+    review_feedback_str = json.dumps(review_feedback, ensure_ascii=False, indent=2)
 
     if not review_feedback or review_feedback.get("status") == "pass":
         thought_msg = f"任务 '{task}'确定为[{category}/{field}]场景，深度[{depth}]，面向[{audience}]，开始拆解初步执行计划...."
@@ -134,28 +152,22 @@ def planner_node(state: ResearchState):
             category=category,
             field=field,
             depth=depth, 
-            task=task
+            task=task,
+            current_plan="[]",
+            review_feedback="{}"
         )
         user_input = f"任务：{task}"
     else:
         print(f"---[Planner]收到Review反馈，调整计划{review_feedback}---")
         thought_msg = f"收到审核反馈，正在根据意见[{review_feedback.get('reason')}]调整执行计划...."
-        system_prompt = f"""
-        你是一个具有深度反思能力的首席分析师。
-        你之前的研究计划未能通过审核，现在需要基于反馈进行反思并调整计划。
-        
-        【审核反馈】
-        状态：{review_feedback.get('status')}
-        意见：{review_feedback.get('reason')}
-        缺失内容：{review_feedback.get('missing')}
-        
-        【反思要求】
-        1. 分析为什么之前的研究没能覆盖到这些缺失点。
-        2. 针对缺失内容，增加 1-2 个极其精准的搜索或分析步骤。
-        3. 保持原有已完成步骤的逻辑连贯性，不要删除已有的正确结论。
-        
-        请以 JSON 数组格式输出更新后的完整执行计划。
-    """
+        system_prompt = PLANNER_PROMPT.format(
+            category=category,
+            field=field,
+            depth=depth,
+            task=task,
+            current_plan=current_plan_str,
+            review_feedback=review_feedback_str
+        )
         user_input = f"原任务：{task}\n 审核意见：{review_feedback.get('missing','内容缺失')}\n"
 
     # 使用 JsonOutputParser 获取格式说明
@@ -206,36 +218,88 @@ def planner_node(state: ResearchState):
             else:
                 plan = [plan]
 
-        for step in plan:
+        for i,step in enumerate(plan):
             if "status" not in step:
                 step["status"] = "pending"
+            if "id" not in step:
+                step["id"] = generate_step_id(step.get("topic",step.get("description","")), i)
+        
+        def _norm_desc(text:str)->str:
+            if not text:
+                return ""
+            return re.sub(r'\s+','',text).lower()
+
+        old_plan_map = {}
+        for p in state.get("plan",[]):
+            if p.get("id"):
+                old_plan_map[p["id"]] = p
+            if p.get("description"):
+                old_plan_map[_norm_desc(p["description"])] = p
+
+        merged_plan = []
+        for step in plan:
+            step_id = step.get("id")
+            norm_desc = _norm_desc(step.get("description",""))
+            old_step = None
+            if step_id and step_id in old_plan_map:
+                old_step = old_plan_map.get(step_id)
+            elif norm_desc and norm_desc in old_plan_map:
+                old_step = old_plan_map.get(norm_desc)
+
+            if old_step:
+                step["result"] = old_step.get("result", "")
+                step["doc_ids"] = old_step.get("doc_ids", [])
+                step["status"] = old_step.get("status", step.get("status", "pending"))
+
+            if step.get("status") == "completed" and not step.get("result"):
+                logger.warning(f"Step '{step_id or norm_desc}' marked as completed but has no result, reverting to pending.")
+                step["status"] = "pending"
+            if not old_step and step.get("status") == "completed":
+                logger.warning(f"New step '{step_id or norm_desc}' cannot be marked as completed, setting to pending.")
+                step["status"] = "pending"
+
+            merged_plan.append(step)
 
         return {
-            "plan": plan,
+            "plan": merged_plan,
             "current_step_index": 0,
             "thought_process": thought_msg
         }
     except Exception as e:
-        print(f"---[Planner]解析失败，生成兜底分布计划{e}---")
-        return {
-            "plan": [{
-                "type": "research", 
-                "description":f"{task} - 第一部分：核心概念与背景调研",
-                "status":"pending"
-            },
-            {
-                "type": "research",
-                "description":f"{task} - 第二部分：深度分析与核心内容",
-                "status":"pending"
-            },
-            {
-                "type": "research",
-                "description":f"{task} - 第三部分：总结、建议",
-                "status":"pending"
-            }],
-            "current_step_index": 0,
-            "thought_process": thought_msg
+        logger.error(f"Planner LLM failed: {e}")
+        old_plan = state.get("plan",[]) or []
+        fallback_key = {
+            "type":"research",
+            "topic":"补充修订",
+            "description":f"根据审核反馈补充缺失点，{review_feedback.get('missing','完善内容')}",
+            "status":"pending",
+            "id": generate_step_id(f"fallback_fix", 999)
         }
+        return {
+            "plan": old_plan + [fallback_key],
+            "current_step_index": 0,
+            "thought_process": "解析失败，生成兜底执行计划。"
+        }
+        # print(f"---[Planner]解析失败，生成兜底分布计划{e}---")
+        # return {
+        #     "plan": [{
+        #         "type": "research", 
+        #         "description":f"{task} - 第一部分：核心概念与背景调研",
+        #         "status":"pending"
+        #     },
+        #     {
+        #         "type": "research",
+        #         "description":f"{task} - 第二部分：深度分析与核心内容",
+        #         "status":"pending"
+        #     },
+        #     {
+        #         "type": "research",
+        #         "description":f"{task} - 第三部分：总结、建议",
+        #         "status":"pending"
+        #     }],
+        #     "current_step_index": 0,
+        #     "thought_process": thought_msg
+        # }
     
 def orchestrator_node(state: ResearchState):
     '''
@@ -887,6 +951,12 @@ def writer_node(state: ResearchState):
     
     if use_sectional_writing:
         logger.info(f"---[Writer] 切换到分章节写作方式 ---")
+        # 增量写作逻辑
+        last_draft_sections = state.get("draft_sections", [])
+        last_citations = state.get("citations", [])
+        # 构建已有章节映射
+        existing_sections_map = {s['title']: s for s in last_draft_sections}
+
         draft_sections: List[DraftState] = []
         total_output_tokens = 0
         accumulated_content = ""
@@ -904,30 +974,64 @@ def writer_node(state: ResearchState):
         logger.warning(f"-- [Writer] 每个章节 Token 预算为 {per_section_buget} --")
 
         for i,step in enumerate(plan):
-            logger.info(f"---[Writer] 正在生成章节 {i+1}: {step.get('description','章节')} ---")
-            section_content, section_tokens = generate_section(
-                section_id=i + 1,
-                plan_step={**step,"task": task},
-                style_config=style_inst,
-                citations=citations,
-                llm=llm,
-                all_sections_context=accumulated_content,
-                max_tokens=per_section_buget
-            )
-            section: DraftState = {
-                "section_id": i + 1,
-                "title": step.get("description",f'第 {i+1} 章节'),
-                "content": section_content,
-                "source_step_id":step.get("id",i) ,
-                "token_count": section_tokens,
-                "status": "draft",
-                "edit_history": []
-            }
+            step_desc = step.get("description","章节")
+            step_topic = step.get("topic","")
+            # 是否复用
+            can_reuse = False
+            reused_section = None
+            if step.get("status") == "completed" :
+                target_key = step_topic if (step_topic and step_topic in existing_sections_map) else step_desc
+                
+                if target_key in existing_sections_map:
+                    reused_section = existing_sections_map[target_key]
+                else:
+                    reused_section = find_matching_section(step_desc,existing_sections_map)
 
-            draft_sections.append(section)
-            # 累计内容用于后续章节的上下文
-            accumulated_content += f"\n### {step.get('description',f'第 {i+1} 章节')}\n{section_content}\n"
-            total_output_tokens += section_tokens
+            if reused_section:
+                logger.info(f"---[Writer] 复用章节 {step_desc} ---")
+
+                # 防止混乱重新映射
+                reused_content = remap_citations(
+                    reused_section['content'],
+                    old_citations=last_citations,
+                    new_citations=citations
+                )
+                # 新状态对象
+                new_section = reused_section.copy()
+                new_section["section_id"] = i + 1
+                new_section["title"] = step_topic or reused_section.get("title", step_desc[:50])
+                new_section['content'] = reused_content
+                new_section['source_step_id'] = step.get("id", i)
+                
+                draft_sections.append(new_section)
+
+                accumulated_content += f"\n### {new_section['title']}\n{reused_content}\n"
+                total_output_tokens += reused_section.get("token_count",0)
+            else:
+                logger.info(f"---[Writer] 正在生成章节 {i+1}: {step.get('description','章节')} ---")
+                section_content, section_tokens = generate_section(
+                    section_id=i + 1,
+                    plan_step={**step,"task": task},
+                    style_config=style_inst,
+                    citations=citations,
+                    llm=llm,
+                    all_sections_context=accumulated_content,
+                    max_tokens=per_section_buget
+                )
+                section: DraftState = {
+                    "section_id": i + 1,
+                    "title": step_topic or step_desc[:50],
+                    "content": section_content,
+                    "source_step_id":step.get("id",i) ,
+                    "token_count": section_tokens,
+                    "status": "draft",
+                    "edit_history": []
+                }
+
+                draft_sections.append(section)
+                # 累计内容用于后续章节的上下文
+                accumulated_content += f"\n### {section['title']}\n{section_content}\n"
+                total_output_tokens += section_tokens
         
         # 合并章节为最终草稿
         final_draft = merge_sections_to_draft(
@@ -935,6 +1039,9 @@ def writer_node(state: ResearchState):
             sections=draft_sections,
             citations=citations
         )
+        # 智能截断防止引用丢失
+        final_draft = smart_truncate_draft(final_draft, max_length=10000)
+
         logger.info(f"---[Writer] 全文合并完成，累计输出Tokens: {total_output_tokens} ---")
         return {
             "draft": final_draft, 

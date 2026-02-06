@@ -66,8 +66,10 @@ PLANNER_PROMPT = """你是一个高级项目经理。根据任务类型规划执
 - field: {field}（tech|finance|lifestyle|education|culture|news）
 - depth: {depth}（quick|moderate|deep）
 - task: {task}（用户的原始查询）
+- current_plan: {current_plan}  // 新增：传入当前计划
+- review_feedback: {review_feedback} // 新增：传入审核反馈
 
-【规划规则】
+【规划规则 - 1】
 
 **如果 category == "report"（深度分析类）：**
 - 步骤数：4-6 步
@@ -90,21 +92,43 @@ PLANNER_PROMPT = """你是一个高级项目经理。根据任务类型规划执
 **如果 category == "chat"（聊天类）：**
 - 不需要规划，直接进入 chat_node
 
+【规划规则 - 2】
+**如果 current_plan 为 "[]" (首次规划):**
+- 按照原始规则规划 - 1 生成一个全新的计划。
+- report 类：背景调查 → 多维度分析 → 对比研究 → 趋势预测 → 总结
+- guide 类：需求分析 → 核心教程 → 常见问题 → 注意事项 → 进阶建议
+
+**如果 current_plan 不为空 (修订计划):**
+- 你必须在 **current_plan 的基础上** 进行修改，而不是从头创建。
+- **仔细阅读 review_feedback**，理解缺失的内容和原因。
+- **操作指令**:
+  - **保持**：对于已经完成且正确的步骤，保持原样。
+  - **修改**：对于需要调整的步骤，修改其 "description"。
+    - **修改**：description 必须描述本章节要写的内容（如“分析2025年欧洲市场规模”），严禁出现“修改/补充/根据反馈”之类操作性措辞。
+    - 示例（错误）："根据反馈修改第三章" ；（正确）"第三章：2025年欧洲市场规模与增速数据分析"
+  - **新增**：根据反馈，在合适的位置插入新的步骤（"type": "research", "description": "..."）。
+  - **删除**：如果某个步骤被认为是错误的，可以从列表中移除。
+- **目标**：输出一个既包含原有成果、又修正了缺陷的、完整的最终计划。
+
 【输出格式】
 <thinking>
 1. 分析任务场景：[category] 类任务，面向 [audience]
-2. 确定搜索关键词：列出 3-5 个核心搜索词
-3. 规划执行路径：按上述规则设计步骤
+2. 判断模式：首次规划 / 修订计划
+3. (如果修订) 分析反馈：[review_feedback]，确定需要新增/修改的步骤。
+4. 规划执行路径：按上述规则设计或修改步骤。
 </thinking>
 
 ```json
 [
     {{
         "type": "research",
-        "description": "..."
+        "topic": "...", // 必填!2-6字的简短章节标题
+        "description": "..."    // 详细写作指令
     }}
 ]
 ```
+
+⚠️ 每个步骤必须同时包含 `type`（类型）、`topic`（短标题）和 `description`（详细指令），缺一不可。
 """
 
 STYLE_ANALYZER_PROMPT = """你是一个文本风格专家。基于内容类型判断最适合的写作风格。

@@ -116,6 +116,61 @@ def normalize_data(results: Any,query: str,source: str = "tavily") -> List[Dict[
         return []
     
 
+def remap_citations(text:str, old_citations: List[Dict],new_citations: List[Dict]) -> str:
+    """
+    重审更新引用列表
+    """
+    if not text or not old_citations or not new_citations:
+        return text
+    
+    id_to_new_index = {
+        c['id']: c['index'] 
+        for c in new_citations 
+        if 'id' in c
+    }
+    old_index_to_id = {
+        c['index']: c['id'] 
+        for c in old_citations
+        if 'id' in c
+    }
+    def replace_match(match):
+        old_index = int(match.group(1))
+        if old_index in old_index_to_id:
+            doc_id = old_index_to_id[old_index]
+            if doc_id in id_to_new_index:
+                return f"[{id_to_new_index[doc_id]}]"
+        return match.group(0)
+    
+    return re.sub(r'\[(\d+)\]', replace_match, text)
+
+def smart_truncate_draft(draft: str, max_length: int = 15000) -> str:
+    """
+    智能截断长文(保护引用列表)
+    """
+    if len(draft) <= max_length:
+        return draft
+    
+    citation_marker = '## 引用列表'
+    parts = draft.split(citation_marker)
+    if len(parts) < 2:
+        return draft[:max_length] + "\n...(truncated)..."
+    
+    body = parts[0]
+    citations = citation_marker + parts[1]
+    if len(citations) >= max_length * 0.5:
+        return draft[:max_length]
+    
+    available_length = max_length - len(citations) - 100
+    if available_length <= 0:
+        return draft[:max_length]
+    
+    truncated_body = body[:available_length]
+    last_newline = truncated_body.rfind('\n\n')
+    if last_newline != -1:
+        truncated_body = truncated_body[:last_newline]
+
+    return f"{truncated_body}\n\n...(中间内容已省略以适应Token限制)...\n\n{citations}"
+
 def smart_truncate(text: str, max_length: int, add_ellipsis: bool = True) -> str:
     """
     智能截断文本：

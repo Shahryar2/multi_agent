@@ -1,10 +1,12 @@
 import logging
 import time
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from deepinsight.core.llm import get_llm
+from deepinsight.graph.state import DraftState
 from deepinsight.prompts.prompt_demo import SUMMARIZE_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -57,3 +59,23 @@ def map_summarize_documents(
 
     logger.info("文档摘要处理完成。")
     return summarized_docs
+
+
+def find_matching_section(
+        step_desc: str,
+        existing_sections: Dict[str,DraftState],
+        threshold:float = 0.7
+    )-> Optional[DraftState]:
+    """
+    基于语义相似度查找可复用章节
+    """
+    best_match = None
+    best_ratio = 0.0
+
+    for title, section in existing_sections.items():
+        ratio = SequenceMatcher(None,step_desc,title).ratio()
+        if ratio >= best_ratio and ratio >= threshold:
+            best_ratio = ratio
+            best_match = section
+
+    return best_match
