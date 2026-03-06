@@ -435,38 +435,57 @@ class CitationSelector:
             citations: List[Dict[str,Any]],
             section_topic: str,
             section_result: str = "",
+            priority_ids: List[str] = None,
         ) -> List[Dict[str,Any]]:
         """
-        为章节选择最相关的引用
+        为章节选择最相关的引用。
+
+        优先级策略：
+        - priority_ids 内的文献（研究员专门为该步骤搜到的）优先入选
+        - 剩余名额再从非优先文献里按相关性补充
+        这保证每个章节优先引用自己的研究成果，同时不同章节的引用自然分散
         """
         if not citations:
             return []
         
+        priority_ids_set = set(priority_ids or [])
+
         # 提取关键词
         topic_keywords = self._extract_keywords(section_topic + " " + section_result)
-        scored = []
+        
+        priority_group = []
+        non_priority_group = []
+        
         for citation in citations:
-            citation = citation.copy()
-
-            title = citation.get("title","")
-            snippet = citation.get("snippet",citation.get("text",""))[:500]
+            c = citation.copy()
+            title = c.get("title","")
+            snippet = c.get("snippet",c.get("text",""))[:500]
             citation_keywords = self._extract_keywords(title + " " + snippet)
 
-            # 计算关键词重叠度
             overlap = len(topic_keywords & citation_keywords)
             relevance = overlap / max(len(citation_keywords),1)
+            original_score = c.get("quality_score", c.get("score", 0.5))
+            c["relevance_score"] = relevance * 0.6 + original_score * 0.4
 
-            original_score = citation.get("quality_score", citation.get("score", 0.5))
-            citation["relevance_score"] = relevance * 0.6 + original_score * 0.4
-            scored.append(citation)
+            if c.get("id") in priority_ids_set:
+                priority_group.append(c)
+            else:
+                non_priority_group.append(c)
 
-        # 按相关性排序
-        scored.sort(key=lambda x: x.get("relevance_score",0), reverse=True)
-        selected = scored[:self.max_citations]
-        for citation in selected:
-            snippet = citation.get("snippet",citation.get("text",""))
+        # 两组内各自按相关性排序
+        priority_group.sort(key=lambda x: x.get("relevance_score",0), reverse=True)
+        non_priority_group.sort(key=lambda x: x.get("relevance_score",0), reverse=True)
+
+        # 优先组底大占 max_citations 的 2/3（至少保留一个内容）
+        max_priority = max(1, self.max_citations * 2 // 3)
+        selected_priority = priority_group[:max_priority]
+        remaining_slots = self.max_citations - len(selected_priority)
+        selected = selected_priority + non_priority_group[:remaining_slots]
+
+        for c in selected:
+            snippet = c.get("snippet",c.get("text",""))
             if len(snippet) > self.max_snippet_length:
-                citation["snippet"] = smart_truncate(snippet, self.max_snippet_length)
+                c["snippet"] = smart_truncate(snippet, self.max_snippet_length)
 
         return selected
 
@@ -494,17 +513,18 @@ class CitationSelector:
     
     def format_citations_text(self, citations: List[Dict[str,Any]]) -> str:
         """
-        格式化引用文本列表为字符串
+        格式化引用文本列表为字符串（含全局编号，供LLM在写作时知道该引用哪个数字）
         """
         if not citations:
             return "无可用参考资料"
         
         lines = []
         for c in citations:
+            index = c.get("index", "?")
             title = c.get("title","无标题")
             url = c.get("url","")
             snippet = c.get("snippet",c.get("text",""))[:self.max_snippet_length]
-            lines.append(f"[{title}] ({url}): {snippet}")
+            lines.append(f"[{index}] {title} ({url}): {snippet}")
         
         return "\n".join(lines)
 
@@ -538,7 +558,8 @@ def select_citations_for_section(
     section_topic: str,
     section_result: str = "",
     max_citations: int = 3,
-    max_snippet_length: int = 150
+    max_snippet_length: int = 150,
+    priority_ids: List[str] = None,
 ) -> str:
     """
     为章节选择引用便捷函数
@@ -549,6 +570,7 @@ def select_citations_for_section(
         section_result: 章节结果摘要
         max_citations: 最大引用数量
         max_snippet_length: 引用摘要最大长度
+        priority_ids: 研究员为该步骤专门搜到的文档ID列表，这些ID对应的引用优先入选
 
     Returns:
         str: 格式化后的引用文本
@@ -557,7 +579,7 @@ def select_citations_for_section(
         max_citations=max_citations,
         max_snippet_length=max_snippet_length
     )
-    selected = selector.select_for_section(citations, section_topic, section_result)
+    selected = selector.select_for_section(citations, section_topic, section_result, priority_ids=priority_ids)
     return selector.format_citations_text(selected)
 
 # 全局实例

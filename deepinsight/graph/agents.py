@@ -247,18 +247,38 @@ def planner_node(state: ResearchState):
                 old_step = old_plan_map.get(norm_desc)
 
             if old_step:
-                step["result"] = old_step.get("result", "")
-                step["doc_ids"] = old_step.get("doc_ids", [])
-                step["status"] = old_step.get("status", step.get("status", "pending"))
-
-            if step.get("status") == "completed" and not step.get("result"):
-                logger.warning(f"Step '{step_id or norm_desc}' marked as completed but has no result, reverting to pending.")
-                step["status"] = "pending"
-            if not old_step and step.get("status") == "completed":
-                logger.warning(f"New step '{step_id or norm_desc}' cannot be marked as completed, setting to pending.")
-                step["status"] = "pending"
+                llm_intended_status = step.get("status", "pending")
+                if llm_intended_status == "completed" :
+                    if old_step.get("result") and old_step.get("status") == "completed":
+                        step["result"] = old_step.get("result", "")
+                        step["doc_ids"] = old_step.get("doc_ids", [])
+                        step["status"] = "completed"
+                        logger.info(f"Step '{step_id or norm_desc}' retains completed status with existing result.")
+                    else:
+                        step["status"] = "pending"
+                        step["result"] = ""
+                        step["doc_ids"] = []
+                        logger.warning(f"Step '{step_id or norm_desc}' cannot be marked as completed due to missing result, setting to pending.") 
+                else:
+                    step["status"] = "pending"
+                    step["result"] = ""
+                    step["doc_ids"] = []
+                    logger.info(f"Step '{step_id or norm_desc}' status set to pending, clearing result and doc_ids.")
+            else:
+                if step.get("status") == "completed":
+                    logger.warning(f"New step '{step_id or norm_desc}' is marked as completed but has no history, setting to pending.")
+                    step["status"] = "pending"
 
             merged_plan.append(step)
+
+        is_revision = bool(review_feedback and review_feedback.get("status") == "fail")
+        if is_revision:
+            pending_count = sum(1 for s in merged_plan if s.get("status") == "pending")
+            if pending_count == 0:
+                logger.warning("Review feedback indicates revision, but no pending steps found. Forcing last step to pending.")
+                merged_plan[-1]["status"] = "pending"
+                merged_plan[-1]["result"] = ""
+                merged_plan[-1]["doc_ids"] = []
 
         return {
             "plan": merged_plan,
@@ -268,38 +288,103 @@ def planner_node(state: ResearchState):
     except Exception as e:
         logger.error(f"Planner LLM failed: {e}")
         old_plan = state.get("plan",[]) or []
-        fallback_key = {
-            "type":"research",
-            "topic":"补充修订",
-            "description":f"根据审核反馈补充缺失点，{review_feedback.get('missing','完善内容')}",
-            "status":"pending",
-            "id": generate_step_id(f"fallback_fix", 999)
-        }
-        return {
-            "plan": old_plan + [fallback_key],
-            "current_step_index": 0,
-            "thought_process": "解析失败，生成兜底执行计划。"
-        }
-        # print(f"---[Planner]解析失败，生成兜底分布计划{e}---")
-        # return {
-        #     "plan": [{
-        #         "type": "research", 
-        #         "description":f"{task} - 第一部分：核心概念与背景调研",
-        #         "status":"pending"
-        #     },
-        #     {
-        #         "type": "research",
-        #         "description":f"{task} - 第二部分：深度分析与核心内容",
-        #         "status":"pending"
-        #     },
-        #     {
-        #         "type": "research",
-        #         "description":f"{task} - 第三部分：总结、建议",
-        #         "status":"pending"
-        #     }],
-        #     "current_step_index": 0,
-        #     "thought_process": thought_msg
-        # }
+        
+        is_revision = bool(review_feedback and review_feedback.get("status") == "fail")
+        if is_revision and old_plan:
+            # 修订失败时：用位置策略，将后半段的 completed 步骤重置为 pending
+            # 不使用关键词匹配（不可靠），因为 reviewer 每次反馈的内容都不同
+            fixed_plan = []
+            has_pending = False
+            total_steps = len(old_plan)
+            # 后半段起始索引：至少从第2步开始，最多从中间开始
+            rear_start_idx = max(1, total_steps // 2)
+
+            for i, step in enumerate(old_plan):
+                new_step = step.copy()
+                # 后半段中，将 completed 步骤重置为 pending（跳过已经 failed 的）
+                if i >= rear_start_idx and step.get("status") == "completed":
+                    new_step["status"] = "pending"
+                    new_step["result"] = ""
+                    new_step["doc_ids"] = []
+                    has_pending = True
+                    logger.info(f"fallback: 步骤[{i}] '{step.get('topic','')}' 重置为pending")
+                fixed_plan.append(new_step)
+
+            # 安全兜底：后半段没有 completed 步骤时，强制找最后一个 completed 步骤重置
+            if not has_pending:
+                for step in reversed(fixed_plan):
+                    if step.get("status") == "completed":
+                        step["status"] = "pending"
+                        step["result"] = ""
+                        step["doc_ids"] = []
+                        has_pending = True
+                        break
+
+            # 最终兜底：实在找不到，强制最后一步 pending
+            if not has_pending and fixed_plan:
+                fixed_plan[-1]["status"] = "pending"
+                fixed_plan[-1]["result"] = ""
+                fixed_plan[-1]["doc_ids"] = []
+
+            return {
+                "plan": fixed_plan,
+                "current_step_index": 0,
+                "thought_process": "解析失败，基于位置策略重置后半段步骤为pending。"
+            }
+        elif not old_plan:
+            # 首次规划失败（old_plan为空）：生成结构完整的3步兜底计划
+            # 不能用 old_plan + [单步骤]，否则 plan 只有1步，生成内容极简
+            logger.warning("首次规划解析失败，使用结构化兜底计划")
+            fallback_plan = [
+                {
+                    "type": "research",
+                    "topic": "背景与需求",
+                    "description": f"分析'{task}'的背景、用户需求和核心痛点",
+                    "status": "pending",
+                    "result": "",
+                    "doc_ids": [],
+                    "id": generate_step_id("背景与需求", 0)
+                },
+                {
+                    "type": "research",
+                    "topic": "核心内容",
+                    "description": f"详细阐述'{task}'的核心内容、方法和策略",
+                    "status": "pending",
+                    "result": "",
+                    "doc_ids": [],
+                    "id": generate_step_id("核心内容", 1)
+                },
+                {
+                    "type": "research",
+                    "topic": "总结与建议",
+                    "description": f"总结'{task}'的关键要点，提供具体可操作的建议",
+                    "status": "pending",
+                    "result": "",
+                    "doc_ids": [],
+                    "id": generate_step_id("总结与建议", 2)
+                }
+            ]
+            return {
+                "plan": fallback_plan,
+                "current_step_index": 0,
+                "thought_process": "首次规划解析失败，使用结构化兜底计划。"
+            }
+        else:
+            # 修订失败且 old_plan 非空的极端情况：追加一个修订步骤
+            fallback_key = {
+                "type": "research",
+                "topic": "补充修订",
+                "description": f"根据审核反馈补充缺失内容：{review_feedback.get('missing', '完善内容')}",
+                "status": "pending",
+                "result": "",
+                "doc_ids": [],
+                "id": generate_step_id("fallback_fix", 999)
+            }
+            return {
+                "plan": old_plan + [fallback_key],
+                "current_step_index": 0,
+                "thought_process": "解析失败，追加补充修订步骤。"
+            }
     
 def orchestrator_node(state: ResearchState):
     '''
@@ -701,15 +786,20 @@ def generate_section(
     step_description = plan_step.get("description","")
     step_result = plan_step.get("result","")
     task = plan_step.get("task","")
+    step_doc_ids = plan_step.get("doc_ids", [])  # 研究员专门为该步骤搜到的文档ID
     
     citations_text = select_citations_for_section(
         citations,
         section_topic=step_description,
         section_result=step_result,
-        max_citations=3,
-        max_snippet_length=150
+        max_citations=5,  # 不同章节优先使用自己的研究成果，名额提升到 5 给LLM更多选择
+        max_snippet_length=150,
+        priority_ids=step_doc_ids,
     )
     step_result_short = smart_truncate(step_result, max_length=600)
+    # 清洗研究结果中的伪引用标签，防止LLM将其学习为合法的引用格式
+    _FAKE_LABEL_RE = re.compile(r'\[(核心素材|参考资料\d*|研究素材|参考文献|前文脉络)\]', re.UNICODE)
+    step_result_short = _FAKE_LABEL_RE.sub('', step_result_short)
     context_short = smart_truncate(all_sections_context, max_length=500)
     
     persona = style_config.get("persona","你是一个专业内容撰写者")
@@ -723,10 +813,10 @@ def generate_section(
 任务：{task}
 当前章节：第 {section_id} 部分 - {step_description}
 
-【核心素材】
-研究结论：{step_result_short}
+【研究素材（仅供参考，不得直接引用此标签）】
+{step_result_short}
 
-【参考资料】
+【可用文献（引用时只能使用以下编号，格式为[编号]）】
 {citations_text}
 
 {f"【前文脉络】{context_short}" if context_short else ""}
@@ -734,8 +824,11 @@ def generate_section(
 【写作要求】
 1. 字数控制在 {target_words} 字以内。
 2. 必须符合上述设定的写作风格（语气、受众）。
-3. 使用 Markdown 格式，引用格式为 [index]。
-4. 直接输出正文，不要包含 "好的" 或标题。
+3. 使用 Markdown 格式。
+4. 引用来源时，只能使用上方文献列表中出现的数字编号，格式严格为 [1]、[2]、[3] 等。
+5. 严禁在正文中出现 [核心素材]、[参考资料]、[研究素材]、[前文脉络]、[参考文献] 等非数字标签。
+6. 如果没有合适的文献编号可引用，则不引用，不要凭空捏造引用标记。
+7. 直接输出正文，不要包含 "好的" 或标题。
 
 开始写作：
 """
@@ -750,6 +843,9 @@ def generate_section(
     # 检测并修复截断
     # section_content = smart_truncate(section_content, 3000)
     section_content = _fix_truncated_ending(section_content)
+    # 清洗LLM输出中残留的伪引用标签（如[核心素材]、[参考资料]等）
+    _FAKE_LABEL_RE = re.compile(r'\[(核心素材|参考资料\d*|研究素材|参考文献|前文脉络)\]', re.UNICODE)
+    section_content = _FAKE_LABEL_RE.sub('', section_content)
     
     actual_tokens = count_tokens(section_content, model_tag="smart")
     logger.info(f"章节 {section_id} 生成完成，使用Tokens: {actual_tokens}")
@@ -794,7 +890,7 @@ def merge_sections_to_draft(
             f"## {section['title']}\n\n{section['content']}\n\n"
         )
 
-    citations_footer = "\n\n## 引用列表\n" + "\n".join(
+    citations_footer = "\n\n## 引用列表\n\n" + "\n\n".join(
         f"[{c['index']}] {c['title']} — {c['url']}" for c in citations
     )
     return "".join(draft_parts) + citations_footer
@@ -980,12 +1076,13 @@ def writer_node(state: ResearchState):
             can_reuse = False
             reused_section = None
             if step.get("status") == "completed" :
-                target_key = step_topic if (step_topic and step_topic in existing_sections_map) else step_desc
-                
-                if target_key in existing_sections_map:
-                    reused_section = existing_sections_map[target_key]
-                else:
-                    reused_section = find_matching_section(step_desc,existing_sections_map)
+                # 双重查找：优先用 topic 精准匹配，其次用 desc 精准匹配，最后模糊匹配
+                # 注意：只保留一套查找逻辑，避免后面的覆盖前面更好的结果
+                reused_section = (
+                    existing_sections_map.get(step_topic) or
+                    existing_sections_map.get(step_desc) or
+                    find_matching_section(step_topic or step_desc, existing_sections_map)
+                )
 
             if reused_section:
                 logger.info(f"---[Writer] 复用章节 {step_desc} ---")
@@ -1039,10 +1136,39 @@ def writer_node(state: ResearchState):
             sections=draft_sections,
             citations=citations
         )
-        # 智能截断防止引用丢失
-        final_draft = smart_truncate_draft(final_draft, max_length=10000)
+        # 动态计算截断上限：每章节预留3000字符 + 引用列表2000字符
+        # 避免写死10000导致多章节文档在章节中间被截断
+        dynamic_max_length = max(len(plan) * 3000 + 2000, 15000)
+        final_draft = smart_truncate_draft(final_draft, max_length=dynamic_max_length)
 
-        logger.info(f"---[Writer] 全文合并完成，累计输出Tokens: {total_output_tokens} ---")
+        # ── 引用裁剪与重新编号 ──────────────────────────────────────────
+        # 从正文主体（引用列表之前）提取实际用到的编号
+        body_text = final_draft.split("## 引用列表")[0]
+        used_indices = {int(m) for m in re.findall(r'\[(\d+)\]', body_text)}
+        if used_indices:
+            # 只保留被引用的文献，按原顺序排列
+            # 注意：必须用 copy() 防止修改 index 时污染原始 citations（影响 remap 里的旧编号查找）
+            pruned_citations_raw = [c for c in citations if c['index'] in used_indices]
+            old_to_new = {c['index']: new_i for new_i, c in enumerate(pruned_citations_raw, start=1)}
+            pruned_citations = []
+            for c in pruned_citations_raw:
+                new_c = c.copy()
+                new_c['index'] = old_to_new[c['index']]
+                pruned_citations.append(new_c)
+            # 替换正文中的旧编号（传入未修改的 citations 作为旧映射来源）
+            final_draft = remap_citations(body_text, citations, pruned_citations)
+            # 重建引用列表尾注
+            citations_footer = "\n\n## 引用列表\n\n" + "\n\n".join(
+                f"[{c['index']}] {c['title']} — {c['url']}" for c in pruned_citations
+            )
+            final_draft = final_draft + citations_footer
+            citations = pruned_citations
+            logger.info(f"---[Writer] 引用裁剪完成：{len(used_indices)} 个索引 → 保留 {len(citations)} 篇文献 ---")
+        else:
+            logger.warning("---[Writer] 正文中未检测到任何引用编号，跳过裁剪 ---")
+        # ─────────────────────────────────────────────────────────────────
+
+        logger.info(f"---[Writer] 全文合并完成，累计输出Tokens: {total_output_tokens}，字符数: {len(final_draft)} ---")
         return {
             "draft": final_draft, 
             "citations": citations,
@@ -1084,7 +1210,7 @@ def writer_node(state: ResearchState):
             final_draft = response.content
             
             # Append citations
-            citations_footer = "\n\n## 引用列表\n" + "\n".join(
+            citations_footer = "\n\n## 引用列表\n\n" + "\n\n".join(
                 f"[{c['index']}] {c['title']} — {c['url']}" for c in citations
             )
             return {

@@ -64,7 +64,7 @@ def map_summarize_documents(
 def find_matching_section(
         step_desc: str,
         existing_sections: Dict[str,DraftState],
-        threshold:float = 0.7
+        threshold:float = 0.5
     )-> Optional[DraftState]:
     """
     基于语义相似度查找可复用章节
