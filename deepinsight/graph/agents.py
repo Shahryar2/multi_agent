@@ -767,7 +767,9 @@ def generate_section(
         citations: List[dict],
         llm,
         all_sections_context: str="",
-        max_tokens: int = 3000
+        topics_covered: List[str] = None,
+        max_tokens: int = 3000,
+        review_feedback: str = "",
     )-> Tuple[str,int]: 
     """
     生成单个章节
@@ -800,12 +802,21 @@ def generate_section(
     # 清洗研究结果中的伪引用标签，防止LLM将其学习为合法的引用格式
     _FAKE_LABEL_RE = re.compile(r'\[(核心素材|参考资料\d*|研究素材|参考文献|前文脉络)\]', re.UNICODE)
     step_result_short = _FAKE_LABEL_RE.sub('', step_result_short)
-    context_short = smart_truncate(all_sections_context, max_length=500)
+    context_short = smart_truncate(all_sections_context, max_length=2000)
     
     persona = style_config.get("persona","你是一个专业内容撰写者")
     persona_short = smart_truncate(persona, max_length=100, add_ellipsis=True)
     
     target_words = min(500,(max_tokens * 0.15))
+
+    review_block = ""
+    if review_feedback:
+        review_block = f"""\n【审核修正要求】\n以下是审核反馈，请在本章节写作中务必针对性地修正这些问题：\n{review_feedback}\n"""
+
+    topics_block = ""
+    if topics_covered:
+        topics_str = "、".join(topics_covered)
+        topics_block = f"\n【已覆盖章节主题（请勿在本章节重复这些主题的核心要点）】\n前文已涵盖：{topics_str}。请确保本章节内容与前文互补，不要重复介绍已覆盖的内容。\n"
 
     section_prompt = f"""{persona_short}
 
@@ -820,7 +831,7 @@ def generate_section(
 {citations_text}
 
 {f"【前文脉络】{context_short}" if context_short else ""}
-
+{topics_block}{review_block}
 【写作要求】
 1. 字数控制在 {target_words} 字以内。
 2. 必须符合上述设定的写作风格（语气、受众）。
@@ -1047,6 +1058,15 @@ def writer_node(state: ResearchState):
     
     if use_sectional_writing:
         logger.info(f"---[Writer] 切换到分章节写作方式 ---")
+        # 提取审核反馈（修订轮次时传给 generate_section）
+        review_data = state.get("review", {})
+        review_feedback_str = ""
+        if review_data.get("status") == "fail":
+            missing = review_data.get("missing", "")
+            reason = review_data.get("reason", "")
+            review_feedback_str = f"问题: {missing}\n原因: {reason}".strip()
+            logger.info(f"---[Writer] 修订模式，审核反馈: {review_feedback_str[:120]} ---")
+
         # 增量写作逻辑
         last_draft_sections = state.get("draft_sections", [])
         last_citations = state.get("citations", [])
@@ -1056,6 +1076,7 @@ def writer_node(state: ResearchState):
         draft_sections: List[DraftState] = []
         total_output_tokens = 0
         accumulated_content = ""
+        sections_written: List[str] = []   # 追踪已写章节标题，用于防止重复
         MAX_OUTPUT_TOKENS = 3000
 
         # 计算每个章节token预算
@@ -1101,6 +1122,7 @@ def writer_node(state: ResearchState):
                 new_section['source_step_id'] = step.get("id", i)
                 
                 draft_sections.append(new_section)
+                sections_written.append(new_section["title"])
 
                 accumulated_content += f"\n### {new_section['title']}\n{reused_content}\n"
                 total_output_tokens += reused_section.get("token_count",0)
@@ -1113,7 +1135,9 @@ def writer_node(state: ResearchState):
                     citations=citations,
                     llm=llm,
                     all_sections_context=accumulated_content,
-                    max_tokens=per_section_buget
+                    topics_covered=sections_written if sections_written else None,
+                    max_tokens=per_section_buget,
+                    review_feedback=review_feedback_str
                 )
                 section: DraftState = {
                     "section_id": i + 1,
@@ -1126,6 +1150,7 @@ def writer_node(state: ResearchState):
                 }
 
                 draft_sections.append(section)
+                sections_written.append(section["title"])
                 # 累计内容用于后续章节的上下文
                 accumulated_content += f"\n### {section['title']}\n{section_content}\n"
                 total_output_tokens += section_tokens
@@ -1288,7 +1313,7 @@ def reviewer_node(state: ResearchState):
     llm = get_llm(model_tag="smart")
 
     draft_segment = draft[:10000] if draft else ""
-    system_prompt = REVIEVER_PROMPT.format(task=task, draft_segment=draft_segment)
+    system_prompt = REVIEVER_PROMPT.format(task=task, draft_segment=draft_segment, revision_number=revision_number)
     
     # 显式重构，增强对 Proxy API 的兼容性
     parser = JsonOutputParser()

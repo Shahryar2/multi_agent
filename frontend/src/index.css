@@ -12,19 +12,19 @@
 .markdown-body h1 { @apply text-2xl font-bold mt-6 mb-4 text-white; }
 .markdown-body h2 { @apply text-xl font-bold mt-5 mb-3 text-white; }
 .markdown-body h3 { @apply text-lg font-bold mt-4 mb-2 text-gray-100; }
-.markdown-body p { @apply mb-3 leading-relaxed text-gray-300; }
 .markdown-body ul { @apply list-disc pl-5 mb-3 space-y-1 text-gray-300; }
 .markdown-body ol { @apply list-decimal pl-5 mb-3 space-y-1 text-gray-300; }
 .markdown-body blockquote { @apply border-l-4 border-blue-500 pl-4 py-1 my-3 bg-gray-800 text-gray-300 italic rounded-r; }
 .markdown-body code { @apply bg-gray-800 px-1 py-0.5 rounded text-sm font-mono text-blue-300; }
 .markdown-body pre { @apply bg-gray-900 border border-gray-800 text-gray-300 p-4 rounded-lg overflow-x-auto my-4; }
 .markdown-body pre code { @apply bg-transparent text-inherit p-0; }
-.markdown-body a { @apply text-blue-400 hover:underline; }
+.markdown-body a { @apply text-blue-400 hover:underline; word-break: break-all; overflow-wrap: break-word; }
+.markdown-body p { @apply mb-3 leading-relaxed text-gray-300; overflow-wrap: break-word; }
 .markdown-body table { @apply w-full border-collapse my-4 text-sm text-gray-300; }
 .markdown-body th { @apply bg-gray-800 border border-gray-700 px-3 py-2 text-left font-semibold text-white; }
 .markdown-body td { @apply border border-gray-700 px-3 py-2; }
 .markdown-body hr { @apply border-gray-700 my-6; }
-.markdown-body { @apply font-sans; }
+.markdown-body { @apply font-sans; overflow-wrap: break-word; word-break: break-word; }
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; height: 6px; }

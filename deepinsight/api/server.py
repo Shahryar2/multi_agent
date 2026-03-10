@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from deepinsight.api.user_db import register_user, login_user, save_history, get_histories
+from deepinsight.api.user_db import register_user, login_user, save_history, get_histories, toggle_favorite, delete_history
 from deepinsight.utils.global_state import CANCELLED_TASKS
 
 # 直接使用同步的 create_graph，因为它内部已经配置了 MemorySaver
@@ -58,6 +58,10 @@ class SyncRequest(BaseModel):
     thread_id: str
     messages: List[Dict[str, Any]]
 
+class FavoriteRequest(BaseModel):
+    user_id: str
+    thread_id: str
+
 # --- Auth Endpoints ---
 
 @app.post("/auth/register")
@@ -81,6 +85,16 @@ async def get_history(user_id: str):
 @app.post("/user/sync")
 async def sync_history(req: SyncRequest):
     save_history(req.user_id, req.thread_id, req.messages)
+    return {"status": "ok"}
+
+@app.post("/user/favorite")
+async def toggle_fav(req: FavoriteRequest):
+    is_fav = toggle_favorite(req.user_id, req.thread_id)
+    return {"is_favorite": is_fav}
+
+@app.delete("/user/history/{user_id}/{thread_id}")
+async def remove_history(user_id: str, thread_id: str):
+    delete_history(user_id, thread_id)
     return {"status": "ok"}
 
 # --- Endpoints ---

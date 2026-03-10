@@ -1,7 +1,8 @@
 import sqlite3
 import hashlib
 import uuid
-from typing import Optional, Dict, Any
+import json
+from typing import Optional, Dict, Any, List
 
 DB_PATH = "users.db"
 
@@ -25,6 +26,15 @@ def init_db():
         messages TEXT,
         summary TEXT,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, thread_id)
+    )
+    ''')
+    # Favorites table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS favorites (
+        user_id TEXT,
+        thread_id TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (user_id, thread_id)
     )
     ''')
@@ -76,7 +86,14 @@ def save_history(user_id: str, thread_id: str, messages: Any):
 def get_histories(user_id: str) -> list:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT thread_id, messages, updated_at FROM history WHERE user_id = ? ORDER BY updated_at DESC", (user_id,))
+    cursor.execute("""
+        SELECT h.thread_id, h.messages, h.updated_at,
+               CASE WHEN f.thread_id IS NOT NULL THEN 1 ELSE 0 END as is_favorite
+        FROM history h
+        LEFT JOIN favorites f ON h.user_id = f.user_id AND h.thread_id = f.thread_id
+        WHERE h.user_id = ?
+        ORDER BY h.updated_at DESC
+    """, (user_id,))
     rows = cursor.fetchall()
     conn.close()
     res = []
@@ -84,10 +101,34 @@ def get_histories(user_id: str) -> list:
         res.append({
             "thread_id": r[0],
             "messages": json.loads(r[1]),
-            "updated_at": r[2]
+            "updated_at": r[2],
+            "is_favorite": bool(r[3])
         })
     return res
 
+def toggle_favorite(user_id: str, thread_id: str) -> bool:
+    """Toggle favorite status. Returns new is_favorite state."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM favorites WHERE user_id = ? AND thread_id = ?", (user_id, thread_id))
+    exists = cursor.fetchone()
+    if exists:
+        cursor.execute("DELETE FROM favorites WHERE user_id = ? AND thread_id = ?", (user_id, thread_id))
+        is_fav = False
+    else:
+        cursor.execute("INSERT INTO favorites (user_id, thread_id) VALUES (?, ?)", (user_id, thread_id))
+        is_fav = True
+    conn.commit()
+    conn.close()
+    return is_fav
+
+def delete_history(user_id: str, thread_id: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM history WHERE user_id = ? AND thread_id = ?", (user_id, thread_id))
+    cursor.execute("DELETE FROM favorites WHERE user_id = ? AND thread_id = ?", (user_id, thread_id))
+    conn.commit()
+    conn.close()
+
 # Initialize on module load logic (or call explicitly)
 init_db()
-import json

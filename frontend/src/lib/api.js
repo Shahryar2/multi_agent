@@ -49,6 +49,24 @@ export async function getHistory(userId) {
   return response.json();
 }
 
+export async function toggleFavorite(userId, threadId) {
+  const response = await fetch(`${API_BASE}/user/favorite`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: userId, thread_id: threadId }),
+  });
+  if (!response.ok) throw new Error("Failed to toggle favorite");
+  return response.json();
+}
+
+export async function deleteHistory(userId, threadId) {
+  const response = await fetch(`${API_BASE}/user/history/${userId}/${threadId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) throw new Error("Failed to delete history");
+  return response.json();
+}
+
 export async function startTask(query, userId) {
   const response = await fetch(`${API_BASE}/research/start`, {
     method: "POST",

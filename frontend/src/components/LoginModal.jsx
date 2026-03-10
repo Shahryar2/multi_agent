@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { User, Lock, Loader2 } from 'lucide-react';
 import { login, register } from '../lib/api';
 
-export function LoginModal({ isOpen, onLoginSuccess, onClose }) {
+export function LoginModal({ isOpen, onLoginSuccess, onClose, promptMessage }) {
   const [isLogin, setIsLogin] = useState(true);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -36,7 +36,7 @@ export function LoginModal({ isOpen, onLoginSuccess, onClose }) {
       <div className="w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-xl ring-1 ring-gray-200">
         <div className="bg-blue-600 px-6 py-4 text-white">
           <h2 className="text-lg font-semibold">{isLogin ? '登录 DeepInsight' : '注册新账户'}</h2>
-          <p className="text-sm text-blue-100">请登录以同步您的研究历史</p>
+          <p className="text-sm text-blue-100">{promptMessage || '请登录以同步您的研究历史'}</p>
         </div>
         
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
@@ -55,7 +55,7 @@ export function LoginModal({ isOpen, onLoginSuccess, onClose }) {
                 required
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                className="w-full rounded-lg border border-gray-300 pl-9 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                className="w-full rounded-lg border border-gray-300 pl-9 py-2 text-sm text-gray-900 placeholder:text-gray-400 bg-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
                 placeholder="输入用户名"
               />
             </div>
@@ -70,7 +70,7 @@ export function LoginModal({ isOpen, onLoginSuccess, onClose }) {
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full rounded-lg border border-gray-300 pl-9 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                className="w-full rounded-lg border border-gray-300 pl-9 py-2 text-sm text-gray-900 placeholder:text-gray-400 bg-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
                 placeholder="输入密码"
               />
             </div>

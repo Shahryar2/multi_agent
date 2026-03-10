@@ -1,10 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Send, LogIn, UserCircle, Bot, Activity, Clock, Search, ChevronRight, Loader2, PanelRightClose, PanelRightOpen, Brain, Sparkles, Image, ExternalLink } from 'lucide-react';
+import { Send, LogIn, UserCircle, Bot, Activity, Clock, Search, ChevronRight, Loader2, PanelRightClose, PanelRightOpen, Brain, Sparkles, Image, ExternalLink, History, LogOut } from 'lucide-react';
 import { ReferenceSidebar } from './components/ReferenceSidebar';
 import { ApprovalModal } from './components/ApprovalModal';
 import { LoginModal } from './components/LoginModal';
+import { HistoryPanel } from './components/HistoryPanel';
 import { getTaskState, startTask, stopTask, approvePlan, syncHistory, getHistory, API_BASE } from './lib/api';
 
 function App() {
@@ -30,6 +31,11 @@ function App() {
   const [isApprovalOpen, setIsApprovalOpen] = useState(false);
   const [pendingPlan, setPendingPlan] = useState([]);
   const [activeThreadId, setActiveThreadId] = useState(() => localStorage.getItem('di_thread_id'));  
+  
+  // History & Login Prompt
+  const [showHistory, setShowHistory] = useState(false);
+  const [loginPromptOpen, setLoginPromptOpen] = useState(false);
+  const [showUserMenu, setShowUserMenu] = useState(false);
   
   // Persist messages
   useEffect(() => {
@@ -127,6 +133,12 @@ function App() {
 
   const handleSend = async () => {
     if (!input.trim() || isLoading) return;
+
+    // Prompt login if not logged in
+    if (!user) {
+      setLoginPromptOpen(true);
+      return;
+    }
     
     // Clear previous if starting new
     if (messages.length > 0 && !isLoading) {
@@ -300,17 +312,50 @@ function App() {
     }
   };
 
+  const handleReject = async () => {
+    setIsApprovalOpen(false);
+    setIsLoading(false);
+    addLog("Plan rejected. Task cancelled.");
+    // 尝试通知后端取消
+    if (activeThreadId) {
+      try { await stopTask(activeThreadId); } catch (_) {}
+    }
+    // 移除最后一条 assistant 的「正在研究」占位消息
+    setMessages(prev => {
+      const last = prev[prev.length - 1];
+      if (last && last.role === 'assistant' && !last.content) {
+        return prev.slice(0, -1);
+      }
+      return prev;
+    });
+  };
+
   const handleLoginSuccess = async (userData) => {
     setUser(userData);
     localStorage.setItem('di_user', JSON.stringify(userData));
     setShowLogin(false);
+    setLoginPromptOpen(false);
     addLog(`Logged in as ${userData.username}`);
   };
 
   const handleLogout = () => {
     setUser(null);
     localStorage.removeItem('di_user');
+    setShowUserMenu(false);
+    setShowHistory(false);
     addLog("Logged out.");
+  };
+
+  const handleSelectHistory = (historyItem) => {
+    setShowHistory(false);
+    // Restore the session
+    if (historyItem.messages && historyItem.messages.length > 0) {
+      setMessages(historyItem.messages);
+    }
+    if (historyItem.thread_id) {
+      setActiveThreadId(historyItem.thread_id);
+      localStorage.setItem('di_thread_id', historyItem.thread_id);
+    }
   };
 
   // Get current report content
@@ -334,13 +379,40 @@ function App() {
             <div className="flex items-center gap-4">
                  {user ? (
                      <div className="flex items-center gap-3 pl-4 border-l border-white/10">
-                        <div className="text-right hidden sm:block">
-                            <div className="text-xs text-gray-400">Welcome back</div>
-                            <div className="text-sm font-medium text-white">{user.username}</div>
-                        </div>
-                        <button onClick={handleLogout} className="p-2 hover:bg-white/5 rounded-full text-gray-400 hover:text-white transition-colors">
-                            <UserCircle size={20} />
+                        <button
+                          onClick={() => setShowHistory(true)}
+                          className="p-2 hover:bg-white/5 rounded-full text-gray-400 hover:text-white transition-colors"
+                          title="研究历史"
+                        >
+                            <History size={20} />
                         </button>
+                        <div className="relative">
+                          <button
+                            onClick={() => setShowUserMenu(v => !v)}
+                            className="flex items-center gap-2 rounded-full px-3 py-1.5 hover:bg-white/8 transition-colors"
+                          >
+                            <UserCircle size={20} className="text-gray-400" />
+                            <span className="hidden sm:block text-sm font-medium text-white">{user.username}</span>
+                          </button>
+                          {showUserMenu && (
+                            <>
+                              <div className="fixed inset-0 z-40" onClick={() => setShowUserMenu(false)} />
+                              <div className="absolute right-0 top-full mt-2 z-50 w-44 rounded-xl border border-white/10 bg-[#1e1e1e] shadow-xl py-1">
+                                <div className="px-4 py-2 border-b border-white/10">
+                                  <p className="text-xs text-gray-400">已登录为</p>
+                                  <p className="text-sm font-medium text-white truncate">{user.username}</p>
+                                </div>
+                                <button
+                                  onClick={handleLogout}
+                                  className="w-full flex items-center gap-2 px-4 py-2 text-sm text-red-400 hover:bg-red-500/10 transition-colors"
+                                >
+                                  <LogOut size={14} />
+                                  退出登录
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </div>
                      </div>
                  ) : (
                     <button 
@@ -394,6 +466,17 @@ function App() {
                                     </button>
                                 </div>
                              </div>
+
+                             {/* History Quick Access */}
+                             {user && (
+                               <button
+                                 onClick={() => setShowHistory(true)}
+                                 className="flex items-center gap-2 mx-auto text-sm text-gray-500 hover:text-blue-400 transition-colors"
+                               >
+                                 <History size={16} />
+                                 <span>查看历史研究记录</span>
+                               </button>
+                             )}
 
                              {/* Suggestions */}
                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-8 text-left">
@@ -684,13 +767,23 @@ function App() {
       <ApprovalModal 
         isOpen={isApprovalOpen} 
         plan={pendingPlan} 
-        onApprove={handleApprove} 
+        onApprove={handleApprove}
+        onReject={handleReject}
+        onUpdatePlan={setPendingPlan}
       />
       
       <LoginModal 
-        isOpen={showLogin} 
+        isOpen={showLogin || loginPromptOpen} 
         onLoginSuccess={handleLoginSuccess} 
-        onClose={() => setShowLogin(false)} 
+        onClose={() => { setShowLogin(false); setLoginPromptOpen(false); }}
+        promptMessage={loginPromptOpen ? '登录后即可开始研究并保存历史记录' : null}
+      />
+
+      <HistoryPanel
+        user={user}
+        isOpen={showHistory}
+        onClose={() => setShowHistory(false)}
+        onSelectHistory={handleSelectHistory}
       />
     </div>
   );
