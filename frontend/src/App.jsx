@@ -6,7 +6,7 @@ import { ReferenceSidebar } from './components/ReferenceSidebar';
 import { ApprovalModal } from './components/ApprovalModal';
 import { LoginModal } from './components/LoginModal';
 import { HistoryPanel } from './components/HistoryPanel';
-import { getTaskState, startTask, stopTask, approvePlan, syncHistory, getHistory, API_BASE } from './lib/api';
+import { getTaskState, startTask, continueTask, stopTask, approvePlan, syncHistory, getHistory, API_BASE } from './lib/api';
 
 function App() {
   const [user, setUser] = useState(() => {
@@ -140,29 +140,36 @@ function App() {
       return;
     }
     
-    // Clear previous if starting new
-    if (messages.length > 0 && !isLoading) {
-       clearChat(); 
-       // small delay to allow state clear
-       await new Promise(r => setTimeout(r, 0));
-    }
-
     const query = input;
     setInput('');
-    // Initial user message
-    setMessages([
+
+    // 追加新消息到当前对话，不清空历史
+    setMessages(prev => [
+        ...prev,
         { role: 'user', content: query },
-        { role: 'assistant', content: ''}
+        { role: 'assistant', content: '' }
     ]);
     setIsLoading(true);
     addLog(`Starting task: ${query.substring(0, 20)}...`);
 
     try {
-      const { thread_id } = await startTask(query, user?.id);
-      setActiveThreadId(thread_id);
-      connectStream(thread_id);
+      let threadId = activeThreadId;
+      if (threadId) {
+        // 已有会话 - 在同一线程内继续，后端保留 last_draft/messages 上下文
+        await continueTask(threadId, query, user?.id);
+      } else {
+        // 全新会话
+        const { thread_id } = await startTask(query, user?.id);
+        threadId = thread_id;
+        setActiveThreadId(threadId);
+      }
+      connectStream(threadId);
     } catch (err) {
-      setMessages(prev => [...prev, { role: 'assistant', content: `❌ Error: ${err.message}` }]);
+      setMessages(prev => {
+        const copy = [...prev];
+        copy[copy.length - 1] = { role: 'assistant', content: `❌ Error: ${err.message}` };
+        return copy;
+      });
       setIsLoading(false);
     }
   };
@@ -360,7 +367,7 @@ function App() {
 
   // Get current report content
   const currentReport = messages.findLast(m => m.role === 'assistant')?.content || '';
-  const currentUserQuery = messages.find(m => m.role === 'user')?.content || '';
+  const currentUserQuery = messages.findLast(m => m.role === 'user')?.content || '';
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#111111] font-sans antialiased text-gray-100">
@@ -546,157 +553,168 @@ function App() {
                                     ref={reportContainerRef}
                                  >
                                     <div className="max-w-3xl mx-auto space-y-8 pb-20">
-                                        {messages.length > 0 && (() => {
-                                            const activeMsg = messages.findLast(m => m.role === 'assistant');
-                                            if (!activeMsg) return <Loader2WithOrbit />;
-                                            
-                                            return (
-                                                <div className="animate-in fade-in slide-in-from-bottom-4 duration-700">
-                                                    
-                                                    {/* 1. Thought Process Visualization - 改进版本 */}
-                                                    {activeMsg.thought && (
-                                                        <div className="mb-8 rounded-lg border border-cyan-500/30 bg-gradient-to-br from-cyan-500/5 to-blue-500/5 overflow-hidden">
-                                                            <div className="flex items-center gap-2 px-4 py-3 border-b border-cyan-500/20 bg-cyan-500/10 text-cyan-300 text-xs font-semibold uppercase tracking-wider">
-                                                                <Brain size={14} className="text-cyan-400" />
-                                                                <span>System Thinking</span>
+                                        {messages.length > 0 ? (
+                                            <div className="space-y-10">
+                                                {messages.map((msg, idx) => {
+                                                    // 显示用户消息
+                                                    if (msg.role === 'user') {
+                                                        return (
+                                                            <div key={idx} className="flex justify-end animate-in fade-in slide-in-from-bottom-2 duration-500">
+                                                                <div className="max-w-2xl bg-blue-600/20 border border-blue-500/30 rounded-lg p-4 text-gray-100">
+                                                                    <div className="text-xs text-blue-300 font-semibold mb-2 uppercase tracking-wider">Your Question</div>
+                                                                    <div className="text-sm">{msg.content}</div>
+                                                                </div>
                                                             </div>
-                                                            <div className="p-4 text-xs text-gray-300 font-mono whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto custom-scrollbar space-y-1">
-                                                                {activeMsg.thought}
-                                                            </div>
-                                                        </div>
-                                                    )}
+                                                        );
+                                                    }
 
-                                                    {/* 2. Search Results Visualization - 穿插显示版本 */}
-                                                    {activeMsg.searchResults && activeMsg.searchResults.length > 0 && (
-                                                        <div className="mb-8">
-                                                            <div className="flex items-center gap-2 mb-4 text-gray-400 text-sm font-medium">
-                                                                <Sparkles size={16} className="text-cyan-400"/>
-                                                                <span>Research Sources</span>
-                                                            </div>
-                                                            
-                                                            {/* 网格布局：文本和图片穿插 */}
-                                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                                                {activeMsg.searchResults.map((item, idx) => {
-                                                                    // 文本项
-                                                                    if (item.type === 'text') {
-                                                                        return (
-                                                                            <div key={idx} className="group">
-                                                                                {/* 文本卡片 */}
-                                                                                <div className="bg-gradient-to-br from-[#1a1a1a] to-[#0f0f0f] rounded-lg border border-cyan-500/20 hover:border-cyan-400/50 transition-all overflow-hidden shadow-lg hover:shadow-cyan-900/20">
-                                                                                    <div className="p-4 space-y-3 border-b border-white/5">
-                                                                                        <div>
-                                                                                            <div className="text-xs text-cyan-400/80 mb-1 truncate font-mono">
-                                                                                                {(() => {
-                                                                                                    try {
-                                                                                                        return new URL(item.url).hostname;
-                                                                                                    } catch {
-                                                                                                        return 'web';
-                                                                                                    }
-                                                                                                })()}
+                                                    // 显示助手消息
+                                                    if (msg.role === 'assistant') {
+                                                        return (
+                                                            <div key={idx} className="animate-in fade-in slide-in-from-bottom-4 duration-700">
+                                                                {/* 1. Thought Process */}
+                                                                {msg.thought && (
+                                                                    <div className="mb-8 rounded-lg border border-cyan-500/30 bg-gradient-to-br from-cyan-500/5 to-blue-500/5 overflow-hidden">
+                                                                        <div className="flex items-center gap-2 px-4 py-3 border-b border-cyan-500/20 bg-cyan-500/10 text-cyan-300 text-xs font-semibold uppercase tracking-wider">
+                                                                            <Brain size={14} className="text-cyan-400" />
+                                                                            <span>System Thinking</span>
+                                                                        </div>
+                                                                        <div className="p-4 text-xs text-gray-300 font-mono whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto custom-scrollbar space-y-1">
+                                                                            {msg.thought}
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+
+                                                                {/* 2. Search Results */}
+                                                                {msg.searchResults && msg.searchResults.length > 0 && (
+                                                                    <div className="mb-8">
+                                                                        <div className="flex items-center gap-2 mb-4 text-gray-400 text-sm font-medium">
+                                                                            <Sparkles size={16} className="text-cyan-400"/>
+                                                                            <span>Research Sources</span>
+                                                                        </div>
+                                                                        
+                                                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                                            {msg.searchResults.map((item, itemIdx) => {
+                                                                                if (item.type === 'text') {
+                                                                                    return (
+                                                                                        <div key={itemIdx} className="group">
+                                                                                            <div className="bg-gradient-to-br from-[#1a1a1a] to-[#0f0f0f] rounded-lg border border-cyan-500/20 hover:border-cyan-400/50 transition-all overflow-hidden shadow-lg hover:shadow-cyan-900/20">
+                                                                                                <div className="p-4 space-y-3 border-b border-white/5">
+                                                                                                    <div>
+                                                                                                        <div className="text-xs text-cyan-400/80 mb-1 truncate font-mono">
+                                                                                                            {(() => {
+                                                                                                                try {
+                                                                                                                    return new URL(item.url).hostname;
+                                                                                                                } catch {
+                                                                                                                    return 'web';
+                                                                                                                }
+                                                                                                            })()}
+                                                                                                        </div>
+                                                                                                        <a
+                                                                                                            href={item.url}
+                                                                                                            target="_blank"
+                                                                                                            rel="noopener noreferrer"
+                                                                                                            className="text-sm font-semibold text-gray-100 hover:text-cyan-300 transition-colors flex gap-1 items-start group/link line-clamp-2 break-all"
+                                                                                                        >
+                                                                                                            {item.title}
+                                                                                                            <ExternalLink size={12} className="mt-0.5 shrink-0 opacity-40 group-hover/link:opacity-100" />
+                                                                                                        </a>
+                                                                                                    </div>
+                                                                                                    <p className="text-xs text-gray-400 line-clamp-3 leading-relaxed">
+                                                                                                        {item.content}
+                                                                                                    </p>
+                                                                                                </div>
                                                                                             </div>
+                                                                                            {item.related_images && item.related_images.length > 0 && (
+                                                                                                <div className="flex gap-2 mt-3 overflow-x-auto pb-1">
+                                                                                                    {item.related_images.map((img, imgIdx) => (
+                                                                                                        <a
+                                                                                                            key={imgIdx}
+                                                                                                            href={img.url}
+                                                                                                            target="_blank"
+                                                                                                            rel="noopener noreferrer"
+                                                                                                            className="flex-none w-20 h-20 rounded-lg overflow-hidden border border-cyan-500/20 hover:border-cyan-400/50 transition-all group/img shadow-md hover:shadow-cyan-900/30"
+                                                                                                            title={img.description}
+                                                                                                        >
+                                                                                                            <img
+                                                                                                                src={img.url}
+                                                                                                                alt={img.description}
+                                                                                                                className="w-full h-full object-cover opacity-75 group-hover/img:opacity-100 transition-opacity"
+                                                                                                                onError={(e) => {
+                                                                                                                    e.target.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"%3E%3Crect fill="%231a1a1a" width="100" height="100"/%3E%3Ccircle cx="50" cy="50" r="30" fill="none" stroke="%23444" stroke-width="2"/%3E%3Cpath d="M35 65 L65 35 M35 35 L65 65" stroke="%23444" stroke-width="2"/%3E%3C/svg%3E';
+                                                                                                                }}
+                                                                                                            />
+                                                                                                        </a>
+                                                                                                    ))}
+                                                                                                </div>
+                                                                                            )}
+                                                                                        </div>
+                                                                                    );
+                                                                                }
+                                                                                
+                                                                                if (item.type === 'image') {
+                                                                                    return (
+                                                                                        <div key={itemIdx} className="h-40 rounded-lg border border-cyan-500/20 overflow-hidden hover:border-cyan-400/50 transition-all shadow-md hover:shadow-cyan-900/30">
                                                                                             <a
                                                                                                 href={item.url}
                                                                                                 target="_blank"
                                                                                                 rel="noopener noreferrer"
-                                                                                                className="text-sm font-semibold text-gray-100 hover:text-cyan-300 transition-colors flex gap-1 items-start group/link line-clamp-2 break-all"
-                                                                                            >
-                                                                                                {item.title}
-                                                                                                <ExternalLink size={12} className="mt-0.5 shrink-0 opacity-40 group-hover/link:opacity-100" />
-                                                                                            </a>
-                                                                                        </div>
-                                                                                        <p className="text-xs text-gray-400 line-clamp-3 leading-relaxed">
-                                                                                            {item.content}
-                                                                                        </p>
-                                                                                    </div>
-                                                                                </div>
-
-                                                                                {/* 关联图片：穿插显示 */}
-                                                                                {item.related_images && item.related_images.length > 0 && (
-                                                                                    <div className="flex gap-2 mt-3 overflow-x-auto pb-1">
-                                                                                        {item.related_images.map((img, imgIdx) => (
-                                                                                            <a
-                                                                                                key={imgIdx}
-                                                                                                href={img.url}
-                                                                                                target="_blank"
-                                                                                                rel="noopener noreferrer"
-                                                                                                className="flex-none w-20 h-20 rounded-lg overflow-hidden border border-cyan-500/20 hover:border-cyan-400/50 transition-all group/img shadow-md hover:shadow-cyan-900/30"
-                                                                                                title={img.description}
+                                                                                                className="w-full h-full block relative group/imgcard bg-gradient-to-br from-[#1a1a1a] to-[#0f0f0f]"
+                                                                                                title={item.description}
                                                                                             >
                                                                                                 <img
-                                                                                                    src={img.url}
-                                                                                                    alt={img.description}
-                                                                                                    className="w-full h-full object-cover opacity-75 group-hover/img:opacity-100 transition-opacity"
+                                                                                                    src={item.url}
+                                                                                                    alt={item.description}
+                                                                                                    className="w-full h-full object-cover opacity-75 group-hover/imgcard:opacity-100 transition-opacity"
                                                                                                     onError={(e) => {
-                                                                                                        e.target.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"%3E%3Crect fill="%231a1a1a" width="100" height="100"/%3E%3Ccircle cx="50" cy="50" r="30" fill="none" stroke="%23444" stroke-width="2"/%3E%3Cpath d="M35 65 L65 35 M35 35 L65 65" stroke="%23444" stroke-width="2"/%3E%3C/svg%3E';
+                                                                                                        e.target.style.display = 'none';
+                                                                                                        e.target.parentElement.innerHTML = '<div class="w-full h-full bg-gradient-to-br from-gray-800 to-gray-900 flex items-center justify-center"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-8 h-8 text-gray-600"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>';
                                                                                                     }}
                                                                                                 />
+                                                                                                <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover/imgcard:opacity-100 transition-opacity flex items-end p-3">
+                                                                                                    <span className="text-xs text-gray-200 line-clamp-2">{item.description}</span>
+                                                                                                </div>
                                                                                             </a>
-                                                                                        ))}
-                                                                                    </div>
-                                                                                )}
-                                                                            </div>
-                                                                        );
-                                                                    }
+                                                                                        </div>
+                                                                                    );
+                                                                                }
+                                                                                
+                                                                                return null;
+                                                                            })}
+                                                                        </div>
+                                                                    </div>
+                                                                )}
 
-                                                                    // 纯图片项
-                                                                    if (item.type === 'image') {
-                                                                        return (
-                                                                            <div key={idx} className="h-40 rounded-lg border border-cyan-500/20 overflow-hidden hover:border-cyan-400/50 transition-all shadow-md hover:shadow-cyan-900/30">
-                                                                                <a
-                                                                                    href={item.url}
-                                                                                    target="_blank"
-                                                                                    rel="noopener noreferrer"
-                                                                                    className="w-full h-full block relative group/imgcard bg-gradient-to-br from-[#1a1a1a] to-[#0f0f0f]"
-                                                                                    title={item.description}
-                                                                                >
-                                                                                    <img
-                                                                                        src={item.url}
-                                                                                        alt={item.description}
-                                                                                        className="w-full h-full object-cover opacity-75 group-hover/imgcard:opacity-100 transition-opacity"
-                                                                                        onError={(e) => {
-                                                                                            e.target.style.display = 'none';
-                                                                                            e.target.parentElement.innerHTML = '<div class="w-full h-full bg-gradient-to-br from-gray-800 to-gray-900 flex items-center justify-center"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-8 h-8 text-gray-600"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>';
-                                                                                        }}
-                                                                                    />
-                                                                                    <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover/imgcard:opacity-100 transition-opacity flex items-end p-3">
-                                                                                        <span className="text-xs text-gray-200 line-clamp-2">{item.description}</span>
-                                                                                    </div>
-                                                                                </a>
-                                                                            </div>
-                                                                        );
-                                                                    }
-
-                                                                    return null;
-                                                                })}
+                                                                {/* 3. Main Content Report */}
+                                                                {msg.content && (
+                                                                    <div className="space-y-6">
+                                                                        <div className="flex items-center gap-2 mb-4 text-gray-300 text-sm font-semibold">
+                                                                            <Sparkles size={16} className="text-amber-400" />
+                                                                            <span>Research Report</span>
+                                                                        </div>
+                                                                        <div className="markdown-body bg-gradient-to-br from-[#1a1a1a] to-[#0f0f0f] border border-white/5 rounded-lg p-6 prose-invert prose-sm max-w-none">
+                                                                            <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+                                                                
+                                                                {isLoading && idx === messages.length - 1 && !msg.content && (
+                                                                    <div className="mt-12 flex flex-col items-center gap-3 text-gray-500">
+                                                                        <div className="relative w-12 h-12 mb-2">
+                                                                            <div className="absolute inset-0 border-2 border-transparent border-t-cyan-400 border-r-cyan-400 rounded-full animate-spin"></div>
+                                                                            <div className="absolute inset-1 border-2 border-transparent border-b-purple-400 rounded-full animate-spin" style={{animationDirection: 'reverse'}}></div>
+                                                                        </div>
+                                                                        <span className="text-xs font-mono text-gray-400">Synthesizing information...</span>
+                                                                    </div>
+                                                                )}
                                                             </div>
-                                                        </div>
-                                                    )}
-
-                                                    {/* 3. Main Report Content - 带分类样式 */}
-                                                    {activeMsg.content && (
-                                                        <div className="space-y-6">
-                                                            <div className="flex items-center gap-2 mb-4 text-gray-300 text-sm font-semibold">
-                                                                <Sparkles size={16} className="text-amber-400" />
-                                                                <span>Research Report</span>
-                                                            </div>
-                                                            <div className="markdown-body bg-gradient-to-br from-[#1a1a1a] to-[#0f0f0f] border border-white/5 rounded-lg p-6 prose-invert prose-sm max-w-none">
-                                                                <Markdown remarkPlugins={[remarkGfm]}>{activeMsg.content}</Markdown>
-                                                            </div>
-                                                        </div>
-                                                    )}
+                                                        );
+                                                    }
                                                     
-                                                    {isLoading && !activeMsg.content && (
-                                                        <div className="mt-12 flex flex-col items-center gap-3 text-gray-500">
-                                                            <div className="relative w-12 h-12 mb-2">
-                                                                <div className="absolute inset-0 border-2 border-transparent border-t-cyan-400 border-r-cyan-400 rounded-full animate-spin"></div>
-                                                                <div className="absolute inset-1 border-2 border-transparent border-b-purple-400 rounded-full animate-spin" style={{animationDirection: 'reverse'}}></div>
-                                                            </div>
-                                                            <span className="text-xs font-mono text-gray-400">Synthesizing information...</span>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            );
-                                        })()}
+                                                    return null;
+                                                })}
+                                            </div>
+                                        ) : null}
                                     </div>
                                  </div>
 

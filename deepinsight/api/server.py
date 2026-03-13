@@ -134,6 +134,50 @@ async def stop_research(thread_id: str):
     return {"thread_id": thread_id, "status": "cancellation_requested"}
 
 
+@app.post("/research/{thread_id}/continue")
+async def continue_research(thread_id: str, request: ResearchRequest):
+    """
+    Continue an existing research session with a new query.
+    Resets per-run state but preserves conversation context:
+    - last_draft: previous report (injected as context in chat_node)
+    - last_citations: previous citations
+    - messages: full chat history (accumulated via operator.add)
+    If the graph state is gone (e.g. server restarted / MemorySaver cleared),
+    falls back to starting fresh instead of raising 404.
+    """
+    last_draft = ""
+    last_citations = []
+
+    try:
+        snapshot = graph.get_state({"configurable": {"thread_id": thread_id}})
+        if snapshot and snapshot.values:
+            current = snapshot.values
+            last_draft = current.get("draft") or current.get("last_draft") or ""
+            last_citations = current.get("citations") or current.get("last_citations") or []
+    except Exception as e:
+        print(f"--- [API] Could not load state for {thread_id}: {e}. Starting fresh. ---")
+
+    # Reset per-run fields, preserve context for continuity
+    continuation_state = {
+        "task": request.query,
+        "plan": [],
+        "current_step_index": 0,
+        "draft": "",
+        "draft_sections": [],
+        "revision_number": 0,
+        "max_revisions": 2,
+        "writing_mode": "",
+        "is_long_document": False,
+        # Carry over previous output so chat_node can use it as context
+        "last_draft": last_draft,
+        "last_citations": last_citations,
+    }
+
+    PENDING_TASKS[thread_id] = continuation_state
+    print(f"--- [API] Task Continue: {thread_id} | query: {request.query[:40]}... ---")
+    return {"thread_id": thread_id, "status": "continuing"}
+
+
 @app.get("/research/{thread_id}/stream")
 async def stream_research(thread_id: str):
     """

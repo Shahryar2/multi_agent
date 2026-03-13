@@ -77,6 +77,16 @@ export async function startTask(query, userId) {
   return response.json();
 }
 
+export async function continueTask(threadId, query, userId) {
+  const response = await fetch(`${API_BASE}/research/${threadId}/continue`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, user_id: userId }),
+  });
+  if (!response.ok) throw new Error("Failed to continue task");
+  return response.json();
+}
+
 export async function stopTask(threadId) {
   const response = await fetch(`${API_BASE}/research/${threadId}/stop`, {
     method: "POST",
