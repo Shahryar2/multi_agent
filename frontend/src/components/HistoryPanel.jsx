@@ -18,7 +18,7 @@ export function HistoryPanel({ user, isOpen, onClose, onSelectHistory }) {
     if (!user) return;
     setLoading(true);
     try {
-      const data = await getHistory(user.id);
+      const data = await getHistory(user.id, user.token);
       setHistories(data);
     } catch (err) {
       console.error('Failed to load histories:', err);
@@ -30,7 +30,7 @@ export function HistoryPanel({ user, isOpen, onClose, onSelectHistory }) {
   const handleToggleFavorite = async (e, threadId) => {
     e.stopPropagation();
     try {
-      const res = await toggleFavorite(user.id, threadId);
+      const res = await toggleFavorite(user.id, threadId, user.token);
       setHistories(prev =>
         prev.map(h =>
           h.thread_id === threadId ? { ...h, is_favorite: res.is_favorite } : h
@@ -44,7 +44,7 @@ export function HistoryPanel({ user, isOpen, onClose, onSelectHistory }) {
   const handleDelete = async (e, threadId) => {
     e.stopPropagation();
     try {
-      await deleteHistory(user.id, threadId);
+      await deleteHistory(user.id, threadId, user.token);
       setHistories(prev => prev.filter(h => h.thread_id !== threadId));
     } catch (err) {
       console.error('Failed to delete history:', err);
@@ -72,8 +72,9 @@ export function HistoryPanel({ user, isOpen, onClose, onSelectHistory }) {
   const filtered = histories.filter(h => {
     if (filter === 'favorites' && !h.is_favorite) return false;
     if (searchText.trim()) {
-      const query = getQueryFromMessages(h.messages).toLowerCase();
-      if (!query.includes(searchText.toLowerCase())) return false;
+      // ✅ 改动：使用后端返回的 title 字段而非提取消息
+      const title = h.title || "Untitled Session";
+      if (!title.toLowerCase().includes(searchText.toLowerCase())) return false;
     }
     return true;
   });
@@ -170,10 +171,6 @@ export function HistoryPanel({ user, isOpen, onClose, onSelectHistory }) {
           ) : (
             <div className="p-3 space-y-2">
               {filtered.map(h => {
-                const query = getQueryFromMessages(h.messages);
-                const assistantMsg = [...(h.messages || [])].reverse().find(m => m.role === 'assistant');
-                const preview = assistantMsg?.content?.substring(0, 80) || '';
-
                 return (
                   <div
                     key={h.thread_id}
@@ -182,14 +179,21 @@ export function HistoryPanel({ user, isOpen, onClose, onSelectHistory }) {
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex-1 min-w-0">
+                        {/* ✅ 改动：显示后端的 title 字段 */}
                         <div className="text-sm font-medium text-white group-hover:text-blue-300 transition-colors line-clamp-2">
-                          {query}
+                          {h.title || "Untitled Session"}
                         </div>
-                        {preview && (
-                          <p className="text-xs text-gray-500 mt-1.5 line-clamp-2 leading-relaxed">
-                            {preview.replace(/[#*\[\]]/g, '')}...
-                          </p>
-                        )}
+                        {/* ✅ 改动：显示消息数和最后更新时间 */}
+                        <div className="flex items-center gap-3 text-xs text-gray-500 mt-2 space-x-2">
+                          <div className="flex items-center gap-1">
+                            <MessageSquare size={12} />
+                            <span>{h.message_count || 0} 条消息</span>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <Clock size={12} />
+                            <span>{formatTime(h.updated_at)}</span>
+                          </div>
+                        </div>
                       </div>
                       <ChevronRight
                         size={16}
@@ -197,12 +201,7 @@ export function HistoryPanel({ user, isOpen, onClose, onSelectHistory }) {
                       />
                     </div>
 
-                    <div className="flex items-center justify-between mt-3">
-                      <div className="flex items-center gap-1.5 text-xs text-gray-600">
-                        <Clock size={12} />
-                        <span>{formatTime(h.updated_at)}</span>
-                      </div>
-
+                    <div className="flex items-center justify-end mt-3">
                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                         <button
                           onClick={e => handleToggleFavorite(e, h.thread_id)}

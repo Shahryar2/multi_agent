@@ -3,12 +3,15 @@ import uuid
 import json
 import asyncio
 import logging
+import os
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from deepinsight.api.user_db import register_user, login_user, save_history, get_histories, toggle_favorite, delete_history
+from deepinsight.api.user_db import register_user, login_user, save_history, get_histories, toggle_favorite, delete_history, verify_token
+from deepinsight.utils.modes import get_mode_config, get_all_modes, validate_mode
 from deepinsight.utils.global_state import CANCELLED_TASKS
 
 # 直接使用同步的 create_graph，因为它内部已经配置了 MemorySaver
@@ -26,10 +29,21 @@ app = FastAPI(
 )
 
 # CORS configuration
+cors_origins_env = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:5173,http://localhost:3000"
+)
+cors_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
+
+allow_credentials = True
+if "*" in cors_origins:
+    cors_origins = ["*"]
+    allow_credentials = False
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=cors_origins,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -37,13 +51,25 @@ app.add_middleware(
 # In-memory store for pending tasks
 PENDING_TASKS: Dict[str, Dict[str, Any]] = {}
 
+# Auth dependency
+security = HTTPBearer()
+
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+    """Verify token and return user_id."""
+    token = credentials.credentials
+    user_id = verify_token(token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return user_id
+
 # 跟踪取消任务
 # CANCELLED_TASKS = set()
 
 # --- Data Models ---
 class ResearchRequest(BaseModel):
     query: str
-    user_id: Optional[str] = None # Optional user tracking
+    user_id: Optional[str] = None
+    mode: Optional[str] = None  # 场景模式，默认由接口决定
 
 class ApproveRequest(BaseModel):
     thread_id: str
@@ -69,7 +95,9 @@ async def register(req: AuthRequest):
     uid = register_user(req.username, req.password)
     if not uid:
         raise HTTPException(status_code=400, detail="Username already exists")
-    return {"user_id": uid, "username": req.username}
+    from deepinsight.api.user_db import create_token
+    token = create_token(uid)
+    return {"id": uid, "username": req.username, "token": token}
 
 @app.post("/auth/login")
 async def login(req: AuthRequest):
@@ -79,21 +107,29 @@ async def login(req: AuthRequest):
     return user
 
 @app.get("/user/history/{user_id}")
-async def get_history(user_id: str):
+async def get_history(user_id: str, current_user: str = Depends(get_current_user)):
+    if current_user != user_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
     return get_histories(user_id)
 
 @app.post("/user/sync")
-async def sync_history(req: SyncRequest):
+async def sync_history(req: SyncRequest, current_user: str = Depends(get_current_user)):
+    if current_user != req.user_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
     save_history(req.user_id, req.thread_id, req.messages)
     return {"status": "ok"}
 
 @app.post("/user/favorite")
-async def toggle_fav(req: FavoriteRequest):
+async def toggle_fav(req: FavoriteRequest, current_user: str = Depends(get_current_user)):
+    if current_user != req.user_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
     is_fav = toggle_favorite(req.user_id, req.thread_id)
     return {"is_favorite": is_fav}
 
 @app.delete("/user/history/{user_id}/{thread_id}")
-async def remove_history(user_id: str, thread_id: str):
+async def remove_history(user_id: str, thread_id: str, current_user: str = Depends(get_current_user)):
+    if current_user != user_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
     delete_history(user_id, thread_id)
     return {"status": "ok"}
 
@@ -103,11 +139,30 @@ async def remove_history(user_id: str, thread_id: str):
 async def start_research(request: ResearchRequest):
     """
     Start a new research session.
+    
+    Args:
+        request: ResearchRequest with query and optional mode
+        
+    Returns:
+        {"thread_id": str, "mode": str, "status": "created"}
     """
+    # ✅ 验证 mode 有效性
+    mode = request.mode or "research"
+    if not validate_mode(mode):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid mode '{mode}'. Must be one of: research, chat, comparison, follow_up"
+        )
+    
+    # ✅ 获取该模式的配置
+    mode_config = get_mode_config(mode)
+    
     thread_id = str(uuid.uuid4())
     
     initial_state = {
         "task": request.query,
+        "mode": mode,
+        "mode_config": mode_config,
         "plan": [],
         "current_step_index": 0,
         "documents": [],
@@ -115,14 +170,34 @@ async def start_research(request: ResearchRequest):
         "max_revisions": 2,
         "revision_number": 0,
         "is_long_document": False,
-        "writing_mode":"",
+        "writing_mode": "",
         "draft_sections": []
     }
-    
+
     PENDING_TASKS[thread_id] = initial_state
     print(f"--- [API] Task Created: {thread_id} ---")
+    print(f"    Mode: {mode}")
+    print(f"    Config: {mode_config}")
+
+    return {
+        "thread_id": thread_id,
+        "mode": mode,
+        "status": "created"
+    }
+
+@app.get("/research/modes")
+async def get_modes():
+    """
+    获取所有可用的研究模式
     
-    return {"thread_id": thread_id, "status": "created"}
+    Returns:
+        {
+            "research": {"name": "...", "description": "...", "emoji": "..."},
+            "chat": {...},
+            ...
+        }
+    """
+    return get_all_modes()
 
 @app.post("/research/{thread_id}/stop")
 async def stop_research(thread_id: str):
@@ -132,7 +207,6 @@ async def stop_research(thread_id: str):
     CANCELLED_TASKS.add(thread_id)
     print(f"--- [API] Task Cancel Requested: {thread_id} ---")
     return {"thread_id": thread_id, "status": "cancellation_requested"}
-
 
 @app.post("/research/{thread_id}/continue")
 async def continue_research(thread_id: str, request: ResearchRequest):
@@ -147,6 +221,7 @@ async def continue_research(thread_id: str, request: ResearchRequest):
     """
     last_draft = ""
     last_citations = []
+    existing_mode = None
 
     try:
         snapshot = graph.get_state({"configurable": {"thread_id": thread_id}})
@@ -154,12 +229,23 @@ async def continue_research(thread_id: str, request: ResearchRequest):
             current = snapshot.values
             last_draft = current.get("draft") or current.get("last_draft") or ""
             last_citations = current.get("citations") or current.get("last_citations") or []
+            existing_mode = current.get("mode")
     except Exception as e:
         print(f"--- [API] Could not load state for {thread_id}: {e}. Starting fresh. ---")
 
-    # Reset per-run fields, preserve context for continuity
+    mode = request.mode or existing_mode or "research"
+    if not validate_mode(mode):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid mode '{mode}'. Must be one of: research, chat, comparison, follow_up"
+        )
+
+    mode_config = get_mode_config(mode)
+
     continuation_state = {
         "task": request.query,
+        "mode": mode,
+        "mode_config": mode_config,
         "plan": [],
         "current_step_index": 0,
         "draft": "",
@@ -168,14 +254,13 @@ async def continue_research(thread_id: str, request: ResearchRequest):
         "max_revisions": 2,
         "writing_mode": "",
         "is_long_document": False,
-        # Carry over previous output so chat_node can use it as context
         "last_draft": last_draft,
         "last_citations": last_citations,
     }
 
     PENDING_TASKS[thread_id] = continuation_state
     print(f"--- [API] Task Continue: {thread_id} | query: {request.query[:40]}... ---")
-    return {"thread_id": thread_id, "status": "continuing"}
+    return {"thread_id": thread_id, "mode": mode, "status": "continuing"}
 
 
 @app.get("/research/{thread_id}/stream")
@@ -211,7 +296,6 @@ async def stream_research(thread_id: str):
                     return
 
                 kind = event["event"]
-                
                 # 1. LLM Token Streaming
                 if kind == "on_chat_model_stream":
                     # Filter output to only come from the 'writer' node to prevent leakage of thinking process
@@ -227,7 +311,7 @@ async def stream_research(thread_id: str):
 
                 # 2. Node Status
                 elif kind == "on_chain_start":
-                    if event["name"] in ["router", "planner", "researcher", "writer", "verifier", "reviewer"]:
+                    if event["name"] in ["router", "planner", "researcher", "writer", "verifier", "reviewer", "chat"]:
                         yield f"data: {json.dumps({'node': event['name']})}\n\n"
                 
                 # 3. Capture State Updates (Thought Process & Search Data)
@@ -271,6 +355,14 @@ async def stream_research(thread_id: str):
                              except Exception as e:
                                  logger.error(f"Failed to serialize search data: {e}")
 
+                     if node_name == "chat" and isinstance(output, dict):
+                         if "response" in output:
+                             try:
+                                yield f"data: {json.dumps({'response': output['response']})}\n\n"
+                                logger.info(f"--- [Chat] Response sent to client ---")
+                             except Exception as e:
+                                 logger.error(f"Failed to serialize chat response: {e}")
+                     
                      if node_name == "writer" and isinstance(output, dict):
                          if "draft_sections" in output and output["draft_sections"]:
                              try:

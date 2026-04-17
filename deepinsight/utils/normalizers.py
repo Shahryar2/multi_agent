@@ -288,7 +288,7 @@ class ContentCompressor:
         # 过滤过短内容
         segments = [
             s for s in segments
-            if len(s.get("text","")) or len(s.get("content","")) >= self.min_content_length
+            if len(s.get("text", "") or s.get("content", "")) >= self.min_content_length
         ]
         # 去重
         if self.remove_duplicates:

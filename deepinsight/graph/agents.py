@@ -30,82 +30,161 @@ from deepinsight.prompts.prompt_demo import CHAT_PROMPT, PLANNER_PROMPT, REACHER
 
 logger = logging.getLogger(__name__)
 api_semaphore = threading.Semaphore(3)
-vector_store = VectorStore()
 
 def router_node(state: ResearchState):
     """
-    路由节点
+    路由节点 - 改为配置驱动，而非启发式判断
+    
+    根据 state.mode 和 mode_config 决定下一步流程：
+    - chat / follow_up: 直接进入 chat_node
+    - comparison: 进入 planner_node（对比模式）
+    - research: 进入 planner_node（研究模式）
     """
     task = state["task"]
-    logger.info(f"Router received task: {task}")
+    mode = state.get("mode", "research")  # ✅ 读取 mode
+    mode_config = state.get("mode_config", {})  # ✅ 读取配置
+    
+    logger.info(f"🔀 Router: task='{task[:50]}...', mode='{mode}'")
+    
     if not task:
         logger.error("Task is empty!")
-        # Fallback or error handling
         return {"next": "chat"}
 
-    llm = get_llm(model_tag="smart")
-
-    try:
-        system_prompt = ROUTER_PROMPT
-        # Combine system prompt into user message to compatibility with some proxies
-        prompt = ChatPromptTemplate.from_messages([
-            ("user", f"{system_prompt}\n\n用户输入: {{task}}")
-        ])
-        chain = prompt | llm | StrOutputParser()
-
-        logger.info(f"--- [Router] 正在调用LLM进行场景分类... ---")
-        response_text = rate_limited_call(chain.invoke, {"task": task})
-        logger.info(f"Router category: {response_text}")
-        # Parse JSON output
-        try:
-            router_output = json.loads(response_text)
-        except:
-            # 容错处理
-            router_output = {
-                "category": "report",
-                "field": "other",
-                "depth": "moderate",
-                "audience_type": "general"
-            }
-        category = router_output.get("category", "report")
-        field = router_output.get("field", "lifestyle")
-        depth = router_output.get("depth", "moderate")
-        audience = router_output.get("audience", "general")
-        # 自主选择风格预设
-        style = select_style_preset({
-            "category": category,
-            "field": field,
-            "depth": depth,
-            "audience": audience,
-            "task": task
-        })
+    # ✅ 基于 mode 路由，而非自动判断
+    if mode in ["chat", "follow_up"]:
+        # Chat 和 Follow-up 模式：轻量模式，跳过 Planner，直接进入 Chat
+        logger.info(f"    → Chat Mode: 跳过搜索和规划，直接进入对话")
+        style = "general_chat"
         style_config = get_style_config(style)
-        logger.info(f"Router detected style: {style_config}")
-
-    except Exception as e:
-        logger.error(f"Router LLM failed: {e}")
-        # Default fallback
-        category = "report"
-        field = "other"
-        depth = "moderate"
-        audience = "general"
-        style = "tech_deep"
+        base_return = {
+            "category": "chat",
+            "field": "general",
+            "depth": "brief",
+            "audience": "general",
+            "style": style,
+            "style_config": style_config,
+            "last_draft": state.get("last_draft", ""),
+            "last_citations": state.get("last_citations", []),
+            "mode": mode,
+            "mode_config": mode_config,
+        }
+        return {**base_return, "next": "chat"}
     
-    # saved history context
+    # Research 和 Comparison 模式都需要规划，但通过 comparison_mode 标记区分
+    logger.info(f"    → Planning Mode: 进入任务规划流程")
+    
+    # ✅ 尝试用 LLM 分类（当需要时），或使用默认分类
+    category = "report"  # 默认
+    field = "general"
+    depth = "moderate"
+    audience = "general"
+    style = "tech_deep"
+    style_config = get_style_config(style)
+    
+    try:
+        # 仅在 Research 模式下使用 LLM 分类，其他模式使用简化分类
+        if mode == "comparison":
+            # Comparison 模式：维度化思考
+            category = "comparison"
+            depth = "balanced"
+            style = "analytical"
+            logger.info(f"    → Comparison Mode: 维度化分类")
+        else:
+            # Research 模式：使用 LLM 进行详细分类
+            llm = get_llm(
+                model_tag="smart",
+                thread_id=state.get("thread_id"),
+                user_id=state.get("user_id"),
+                mode=state.get("mode"),
+            )
+            system_prompt = ROUTER_PROMPT
+            prompt = ChatPromptTemplate.from_messages([
+                ("user", f"{system_prompt}\n\n用户输入: {{task}}")
+            ])
+            chain = prompt | llm | StrOutputParser()
+            
+            logger.info(f"    → Research Mode: 调用 LLM 进行场景分类...")
+            response_text = rate_limited_call(chain.invoke, {"task": task})
+            
+            try:
+                router_output = json.loads(response_text)
+                category = router_output.get("category", "report")
+                field = router_output.get("field", "other")
+                depth = router_output.get("depth", "moderate")
+                audience = router_output.get("audience", "general")
+                style = select_style_preset({
+                    "category": category,
+                    "field": field,
+                    "depth": depth,
+                    "audience": audience,
+                    "task": task
+                })
+                style_config = get_style_config(style)
+                logger.info(f"    → Detected: category={category}, style={style}")
+            except (json.JSONDecodeError, ValueError) as e:
+                # 尝试从响应中提取 JSON 块
+                json_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
+                json_matches = re.findall(json_pattern, response_text, re.DOTALL)
+                
+                extracted = False
+                if json_matches:
+                    for potential_json in json_matches:
+                        try:
+                            router_output = json.loads(potential_json)
+                            # 验证必要的键
+                            if all(k in router_output for k in ["category", "field", "depth", "audience"]):
+                                category = router_output.get("category", "report")
+                                field = router_output.get("field", "other")
+                                depth = router_output.get("depth", "moderate")
+                                audience = router_output.get("audience", "general")
+                                style = select_style_preset({
+                                    "category": category,
+                                    "field": field,
+                                    "depth": depth,
+                                    "audience": audience,
+                                    "task": task
+                                })
+                                style_config = get_style_config(style)
+                                logger.info(f"    → ⚙️  提取JSON成功: category={category}, style={style}")
+                                extracted = True
+                                break
+                        except json.JSONDecodeError:
+                            continue
+                
+                if not extracted:
+                    logger.error(f"    ⚠️  分类失败 (无法提取JSON): {e}，使用默认分类")
+                    category = "report"
+                    field = "other"
+                    depth = "moderate"
+                    audience = "general"
+                    style = "tech_deep"
+                    style_config = get_style_config(style)
+            except Exception as e:
+                logger.error(f"    ⚠️  分类失败: {e}，使用默认分类")
+                category = "report"
+                field = "other"
+                depth = "moderate"
+                audience = "general"
+                style = "tech_deep"
+                style_config = get_style_config(style)
+                
+    except Exception as e:
+        logger.error(f"🔀 Router error: {e}")
+    
     base_return = {
         "category": category,
         "field": field,
         "depth": depth,
         "audience": audience,
         "style": style,
-        "last_draft": state.get("last_draft",""),
-        "last_citations": state.get("last_citations",[])
+        "style_config": style_config,
+        "last_draft": state.get("last_draft", ""),
+        "last_citations": state.get("last_citations", []),
+        "mode": mode,  # ✅ 传递给下一个节点
+        "mode_config": mode_config,  # ✅ 传递配置
     }
-
-    if category == "chat":
-        return {**base_return, "next": "chat"}
-    else:
-        return {**base_return, "next": "planner"}
+    
+    return {**base_return, "next": "planner"}
 
 
 def generate_step_id(topic: str, index: int) -> str:
@@ -137,7 +216,12 @@ def planner_node(state: ResearchState):
     
     review_feedback = state.get("review",{})
     current_plan = state.get("plan",[]) 
-    llm = get_llm(model_tag="smart")
+    llm = get_llm(
+        model_tag="smart",
+        thread_id=state.get("thread_id"),
+        user_id=state.get("user_id"),
+        mode=state.get("mode"),
+    )
 
     simplified_old_plan = [
         {"id": step.get("id"), "topic": step.get("topic"), "description": step.get("description"), "status": step.get("status")}
@@ -181,7 +265,7 @@ def planner_node(state: ResearchState):
     messages = [HumanMessage(content=full_prompt)]
     
     try:
-        response = llm.invoke(messages)
+        response = rate_limited_call(llm.invoke, messages)
         content = response.content
         # 正则提取markdown中的Json块
         json_match = re.search(r"```json\s*(.*?)\s*```", content, re.DOTALL)
@@ -398,21 +482,35 @@ def orchestrator_node(state: ResearchState):
     else:
         return {"next": "writer"}
 
+def _is_retryable_error(error: Exception) -> bool:
+    """
+    判断是否为可重试错误
+    """
+    message = str(error).lower()
+    retryable_signals = [
+        "429",
+        "500",
+        "incomplete chunked read",
+        "peer closed connection",
+        "connection reset",
+        "readtimeout",
+    ]
+    return any(signal in message for signal in retryable_signals)
+
+
 def rate_limited_call(func, *args, **kwargs):
     """
-    包装器：速率限制+重试逻辑
+    包装器：速率限制+重试逻辑（仅在限速错误时 sleep）
     """
     max_retries = 3
     for attempt in range(max_retries):
         with api_semaphore:
             try:
-                # 随机抖动
-                time.sleep(random.uniform(1.0, 2.5))
                 return func(*args, **kwargs)
             except Exception as e:
-                if ('429' in str(e) or '500' in str(e)) and attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 8
-                    logger.warning(f"API调用失败，尝试重试 {attempt+1}/{max_retries} 次: {e}")
+                if _is_retryable_error(e) and attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 8 + random.uniform(0, 2)
+                    logger.warning(f"API调用失败，{wait_time:.1f}s后重试 {attempt + 1}/{max_retries}: {e}")
                     time.sleep(wait_time)
                     continue
                 raise e
@@ -428,11 +526,22 @@ def validate_document_quality(doc: Document) -> bool:
     #     return False
     return True
 
-def generate_optimized_query(main_task: str, sub_task_desc: str) -> str:
+def generate_optimized_query(
+    main_task: str,
+    sub_task_desc: str,
+    thread_id: str | None = None,
+    user_id: str | None = None,
+    mode: str | None = None,
+) -> str:
     """
     任务描述 -> 精准搜索引擎关键词
     """
-    llm = get_llm(model_tag="smart")
+    llm = get_llm(
+        model_tag="smart",
+        thread_id=thread_id,
+        user_id=user_id,
+        mode=mode,
+    )
     prompt = PromptTemplate.from_template(
     """你是一个专业的搜索引擎优化专家。你的任务是根据用户的【总任务】和当前的【子步骤】，生成一个最适合在 Google/Bing 搜索的关键词。
 
@@ -537,7 +646,13 @@ def research_node(state: ResearchState):
                 "error": "Task Cancelled"
             }
 
-        query = generate_optimized_query(main_task= main_task,sub_task_desc= sub_task_description)
+        query = generate_optimized_query(
+            main_task=main_task,
+            sub_task_desc=sub_task_description,
+            thread_id=thread_id,
+            user_id=state.get("user_id"),
+            mode=state.get("mode"),
+        )
         logger.info(f"--- [Researcher] 优化后的搜索词 [{query}]---")
         
         # 任务取消检查 -- 搜索前
@@ -621,7 +736,12 @@ def research_node(state: ResearchState):
                         "error": "Task Cancelled"
                     }
 
-                llm = get_llm(model_tag="smart")
+                llm = get_llm(
+                    model_tag="smart",
+                    thread_id=thread_id,
+                    user_id=state.get("user_id"),
+                    mode=state.get("mode"),
+                )
                 text_only_docs = [d for d in new_docs if d.metadata.get("type") == "text"]
                 docs_to_summarize = text_only_docs if text_only_docs else new_docs
                 # 构建小型上下文
@@ -765,11 +885,14 @@ def generate_section(
         plan_step: Dict[str,Any],
         style_config: Dict,
         citations: List[dict],
-        llm,
+        llm=None,
         all_sections_context: str="",
         topics_covered: List[str] = None,
         max_tokens: int = 3000,
         review_feedback: str = "",
+        thread_id: str | None = None,
+        user_id: str | None = None,
+        mode: str | None = None,
     )-> Tuple[str,int]: 
     """
     生成单个章节
@@ -843,7 +966,13 @@ def generate_section(
 
 开始写作：
 """
-    llm = get_llm(model_tag="smart")
+    if llm is None:
+        llm = get_llm(
+            model_tag="smart",
+            thread_id=thread_id,
+            user_id=user_id,
+            mode=mode,
+        )
     prompt_tokens = count_tokens(section_prompt, model_tag="smart")
     logger.info(f"章节 {section_id} 提示词Tokens: {prompt_tokens}, 目标输出Tokens: {max_tokens}")
 
@@ -929,7 +1058,12 @@ def writer_node(state: ResearchState):
     style = state.get("style", "tech_deep")  # Get style
     plan = state.get("plan",[])
     documents = state.get("documents", [])
-    llm = get_llm(model_tag="smart")
+    llm = get_llm(
+        model_tag="smart",
+        thread_id=state.get("thread_id"),
+        user_id=state.get("user_id"),
+        mode=state.get("mode"),
+    )
 
     style_inst = get_style_config(style)
     logger.info(f"---[Writer]使用风格配置: {style_inst}---")
@@ -1137,7 +1271,10 @@ def writer_node(state: ResearchState):
                     all_sections_context=accumulated_content,
                     topics_covered=sections_written if sections_written else None,
                     max_tokens=per_section_buget,
-                    review_feedback=review_feedback_str
+                    review_feedback=review_feedback_str,
+                    thread_id=state.get("thread_id"),
+                    user_id=state.get("user_id"),
+                    mode=state.get("mode"),
                 )
                 section: DraftState = {
                     "section_id": i + 1,
@@ -1166,7 +1303,7 @@ def writer_node(state: ResearchState):
         dynamic_max_length = max(len(plan) * 3000 + 2000, 15000)
         final_draft = smart_truncate_draft(final_draft, max_length=dynamic_max_length)
 
-        # ── 引用裁剪与重新编号 ──────────────────────────────────────────
+        # ── 引用裁剪与重新编号 ───
         # 从正文主体（引用列表之前）提取实际用到的编号
         body_text = final_draft.split("## 引用列表")[0]
         used_indices = {int(m) for m in re.findall(r'\[(\d+)\]', body_text)}
@@ -1212,15 +1349,17 @@ def writer_node(state: ResearchState):
         }
     else:
         # 整体生成
+        def _escape_braces(text: str) -> str:
+            return text.replace("{", "{{").replace("}", "}}") if text else ""
+
         full_prompt = WRITER_PROMPT.format(
-            persona = style_inst['persona'],
-            structure = style_inst['structure'],
-            standards = style_inst['standards'],
-            format = style_inst['format'],
-            task=task, 
-            # style=style, 
-            plan_context=plan_context, 
-            docs_context=docs_context
+            persona=_escape_braces(style_inst.get("persona", "")),
+            structure=_escape_braces(style_inst.get("structure", "")),
+            standards=_escape_braces(style_inst.get("standards", "")),
+            format=_escape_braces(style_inst.get("format", "")),
+            task=task,
+            plan_context=plan_context,
+            docs_context=docs_context,
         )
     
         # Combine messages for compatibility
@@ -1310,7 +1449,12 @@ def reviewer_node(state: ResearchState):
         logger.info(f"[Reviewer] 已达到最大修订次数，强制通过")
         return {"review": {"status": "pass", "reason": "达到最大修订次数"}}
     
-    llm = get_llm(model_tag="smart")
+    llm = get_llm(
+        model_tag="smart",
+        thread_id=state.get("thread_id"),
+        user_id=state.get("user_id"),
+        mode=state.get("mode"),
+    )
 
     draft_segment = draft[:10000] if draft else ""
     system_prompt = REVIEVER_PROMPT.format(task=task, draft_segment=draft_segment, revision_number=revision_number)
@@ -1340,11 +1484,13 @@ def simple_researcher_node(state: ResearchState):
     简单搜索节点
     """
     task = state["task"]
-    
+
     tavily_tool = TavilySearch(max_results=1)
 
     logger.info(f"调用简单搜索工具，查询：{task}")
     print(f"搜索结果:{tavily_tool.invoke({'query': task})}")
+
+    return {}
 
 def chat_node(state: ResearchState):
     """
@@ -1368,7 +1514,12 @@ def chat_node(state: ResearchState):
     last_citations = state.get("last_citations", [])
     messages = state.get("messages", [])
 
-    llm = get_llm(model_tag="smart")
+    llm = get_llm(
+        model_tag="smart",
+        thread_id=state.get("thread_id"),
+        user_id=state.get("user_id"),
+        mode=state.get("mode"),
+    )
 
     logger.info(f"--- [Chat] 用户问题：{task[:50]}... ---")
     system_prompt = CHAT_PROMPT

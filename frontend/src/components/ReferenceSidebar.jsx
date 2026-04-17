@@ -50,7 +50,7 @@ export function ReferenceSidebar({ sources, logs = [], onClear }) {
         
         {/* Sources Tab */}
         {activeTab === 'sources' && (
-            <div className="p-4 space-y-3">
+            <div className="p-4 space-y-4">
                 {sources.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-20 text-center text-gray-500">
                     <div className="mb-4 p-3 rounded-full bg-cyan-500/10 border border-cyan-500/20">
@@ -60,9 +60,77 @@ export function ReferenceSidebar({ sources, logs = [], onClear }) {
                     <p className="text-xs mt-2 text-gray-600">开始研究后，相关资料将出现在这里</p>
                 </div>
                 ) : (
-                sources.map((src, idx) => (
-                    <SourceCard key={idx} src={src} idx={idx} />
-                ))
+                // ✅ 新增：分组逻辑
+                <>
+                    {(() => {
+                        // 1. 按 _round 分组
+                        const grouped = {};
+                        sources.forEach((src, idx) => {
+                            const round = src._round || 'unknown';
+                            const question = src._question || '未知问题';
+                            const key = `round_${round}`;
+                            
+                            if (!grouped[key]) {
+                                grouped[key] = {
+                                    round: round,
+                                    question: question,
+                                    sources: []
+                                };
+                            }
+                            grouped[key].sources.push(src);
+                        });
+                        
+                        // 2. 按轮次顺序展示
+                        return Object.values(grouped)
+                            .sort((a, b) => parseInt(a.round) - parseInt(b.round))
+                            .map((group, groupIdx) => {
+                                // 3. 交替颜色：蓝色、青色、蓝色...
+                                const colors = [
+                                    'border-blue-500/30 bg-blue-500/5 bg-opacity-40',
+                                    'border-cyan-500/30 bg-cyan-500/5 bg-opacity-40',
+                                ];
+                                const colorClass = colors[groupIdx % 2];
+                                const bgGradient = groupIdx % 2 === 0 
+                                    ? 'bg-gradient-to-r from-blue-500/10 to-transparent'
+                                    : 'bg-gradient-to-r from-cyan-500/10 to-transparent';
+                                
+                                return (
+                                    <div key={`group_${group.round}`} className={`rounded-lg border-l-4 pl-3 space-y-2.5 py-3 ${colorClass}`}>
+                                        {/* 轮次标题 */}
+                                        <div className={`${bgGradient} -mx-3 px-3 py-2 rounded-t-lg`}>
+                                            <div className={`flex items-center gap-2 text-xs font-bold uppercase tracking-wide ${
+                                                groupIdx % 2 === 0 ? 'text-blue-400' : 'text-cyan-400'
+                                            }`}>
+                                                <span className={`inline-flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold ${
+                                                    groupIdx % 2 === 0 
+                                                        ? 'bg-blue-500/40 text-blue-200' 
+                                                        : 'bg-cyan-500/40 text-cyan-200'
+                                                }`}>
+                                                    {group.round}
+                                                </span>
+                                                <span>第 {group.round} 轮搜索</span>
+                                            </div>
+                                            <div className="mt-1.5 text-xs text-gray-300 font-medium truncate ml-7">
+                                                📌 "{group.question.substring(0, 40)}{group.question.length > 40 ? '...' : ''}"
+                                            </div>
+                                        </div>
+                                        
+                                        {/* 该轮的所有资源 */}
+                                        <div className="space-y-1.5 mt-2">
+                                            {group.sources.map((src) => (
+                                                <SourceCard 
+                                                    key={`${group.round}_${src._sourceIndex}`} 
+                                                    src={src} 
+                                                    round={group.round}
+                                                    isAlternate={groupIdx % 2 === 1}
+                                                />
+                                            ))}
+                                        </div>
+                                    </div>
+                                );
+                            });
+                    })()}
+                </>
                 )}
             </div>
         )}
@@ -113,26 +181,36 @@ export function ReferenceSidebar({ sources, logs = [], onClear }) {
   );
 }
 
-function SourceCard({ src, idx }) {
+function SourceCard({ src, round, isAlternate }) {
     const [expanded, setExpanded] = useState(false);
+    
+    // ✅ 样式根据轮次颜色变更
+    const borderColor = isAlternate ? 'border-cyan-500/30' : 'border-blue-500/30';
+    const bgColor = isAlternate ? 'bg-cyan-500/8 hover:bg-cyan-500/15' : 'bg-blue-500/8 hover:bg-blue-500/15';
+    const expansionBorder = isAlternate ? 'border-cyan-500/50 bg-cyan-500/5 shadow-cyan-900/20' : 'border-blue-500/50 bg-blue-500/5 shadow-blue-900/20';
+    const linkColor = isAlternate ? 'text-cyan-300 hover:text-cyan-200' : 'text-blue-300 hover:text-blue-200';
 
     return (
         <div 
         className={`group relative rounded-lg border transition-all ${
             expanded 
-            ? 'border-cyan-500/50 bg-cyan-500/5 shadow-lg shadow-cyan-900/20' 
-            : 'border-cyan-500/20 bg-[#1a1a1a] hover:border-cyan-500/40 hover:bg-[#1a1a1a]/80 shadow-sm hover:shadow-md'
+            ? `${expansionBorder} shadow-lg` 
+            : `${borderColor} ${bgColor} shadow-sm hover:shadow-md`
         }`}
         >
         <div className="flex items-start justify-between gap-2 p-3">
-            <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-cyan-500/30 to-blue-500/30 text-[11px] font-bold text-cyan-300 border border-cyan-500/40">
-            {idx + 1}
+            <div className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-bold border ${
+                isAlternate
+                    ? 'bg-gradient-to-br from-cyan-500/30 to-blue-500/30 text-cyan-300 border-cyan-500/40'
+                    : 'bg-gradient-to-br from-blue-500/30 to-cyan-500/30 text-blue-300 border-blue-500/40'
+            }`}>
+            {src._sourceIndex}
             </div>
             <a 
             href={src.url || '#'} 
             target="_blank" 
             rel="noreferrer"
-            className="flex-1 text-xs font-semibold text-cyan-300 break-all hover:text-cyan-200 transition-colors line-clamp-2"
+            className={`flex-1 text-xs font-semibold break-all transition-colors line-clamp-2 ${linkColor}`}
             title={src.title}
             >
             {src.title || "无标题文档"}

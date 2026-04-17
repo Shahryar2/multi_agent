@@ -11,7 +11,18 @@ import { getTaskState, startTask, continueTask, stopTask, approvePlan, syncHisto
 function App() {
   const [user, setUser] = useState(() => {
     const saved = localStorage.getItem('di_user');
-    return saved ? JSON.parse(saved) : null;
+    if (!saved) return null;
+    try {
+      const userData = JSON.parse(saved);
+      // 如果旧数据没有 token，清除并强制重新登录
+      if (!userData.token) {
+        localStorage.removeItem('di_user');
+        return null;
+      }
+      return userData;
+    } catch {
+      return null;
+    }
   });
   const [showLogin, setShowLogin] = useState(false);
   
@@ -26,16 +37,59 @@ function App() {
   const [sources, setSources] = useState([]);
   const [logs, setLogs] = useState([]);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  
+  // ✅ 新增：场景模式选择
+  const [selectedMode, setSelectedMode] = useState('research');
+  const [availableModes, setAvailableModes] = useState({});
 
   // Approval State
-  const [isApprovalOpen, setIsApprovalOpen] = useState(false);
-  const [pendingPlan, setPendingPlan] = useState([]);
+  const [isApprovalOpen, setIsApprovalOpen] = useState(() => {
+    const saved = localStorage.getItem('di_pending_plan');
+    return saved ? true : false;
+  });
+  const [pendingPlan, setPendingPlan] = useState(() => {
+    const saved = localStorage.getItem('di_pending_plan');
+    return saved ? JSON.parse(saved) : [];
+  });
   const [activeThreadId, setActiveThreadId] = useState(() => localStorage.getItem('di_thread_id'));  
   
   // History & Login Prompt
   const [showHistory, setShowHistory] = useState(false);
   const [loginPromptOpen, setLoginPromptOpen] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
+
+  // useRef for EventSource
+  const eventSourceRef = useRef(null);
+
+  // Persist pendingPlan
+  useEffect(() => {
+    if (pendingPlan.length > 0) {
+      localStorage.setItem('di_pending_plan', JSON.stringify(pendingPlan));
+    } else {
+      localStorage.removeItem('di_pending_plan');
+    }
+  }, [pendingPlan]);
+  
+  // ✅ 新增：获取可用的模式配置
+  useEffect(() => {
+    const fetchModes = async () => {
+      try {
+        const response = await fetch(`${API_BASE || 'http://localhost:8000'}/research/modes`);
+        const modes = await response.json();
+        setAvailableModes(modes);
+      } catch (err) {
+        console.error('Failed to fetch modes:', err);
+        // 如果失败，使用默认模式
+        setAvailableModes({
+          research: { emoji: '📊', name: '深度研究报告' },
+          chat: { emoji: '💬', name: '轻量随聊' },
+          comparison: { emoji: '📝', name: '快速对比' },
+          follow_up: { emoji: '🔍', name: '追问前文' },
+        });
+      }
+    };
+    fetchModes();
+  }, []);
   
   // Persist messages
   useEffect(() => {
@@ -98,9 +152,9 @@ function App() {
   useEffect(() => {
     if(activeThreadId) localStorage.setItem('di_thread_id', activeThreadId);
     // Sync to server if user logged in
-    if (user && activeThreadId && messages.length > 0) {
+    if (user && user.token && activeThreadId && messages.length > 0) {
         const timeout = setTimeout(() => {
-            syncHistory(user.id, activeThreadId, messages).catch(console.error);
+            syncHistory(user.id, activeThreadId, messages, user.token).catch(console.error);
         }, 3000);
         return () => clearTimeout(timeout);
     }
@@ -118,6 +172,24 @@ function App() {
   const addLog = (msg) => {
     const time = new Date().toLocaleTimeString([], { hour12: false });
     setLogs(prev => [...prev, `[${time}] ${msg}`]);
+  };
+
+  const extractThinking = (text) => {
+    if (!text) return { thinking: "", cleaned: text };
+    const matches = [...text.matchAll(/<thinking>([\s\S]*?)<\/thinking>/gi)];
+    if (matches.length === 0) return { thinking: "", cleaned: text };
+
+    const thinking = matches
+      .map((m) => (m[1] || "").trim())
+      .filter(Boolean)
+      .join("\n\n");
+
+    const cleaned = text
+      .replace(/<thinking>[\s\S]*?<\/thinking>/gi, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+
+    return { thinking, cleaned };
   };
 
   // Clear Chat Function
@@ -143,27 +215,33 @@ function App() {
     const query = input;
     setInput('');
 
-    // 追加新消息到当前对话，不清空历史
-    setMessages(prev => [
-        ...prev,
+    // ✅ 修复：先计算新的 currentRound，然后再更新 messages
+    const newMessages = [
+        ...messages,
         { role: 'user', content: query },
         { role: 'assistant', content: '' }
-    ]);
+    ];
+    const userMessageCount = newMessages.filter(m => m.role === 'user').length;
+    const currentRound = userMessageCount;
+    const currentQuestion = query;
+
+    // 追加新消息到当前对话，不清空历史
+    setMessages(newMessages);
     setIsLoading(true);
-    addLog(`Starting task: ${query.substring(0, 20)}...`);
+    addLog(`Starting task: ${query.substring(0, 20)}... [Mode: ${selectedMode}]`); // ✅ 显示选择的模式
 
     try {
       let threadId = activeThreadId;
       if (threadId) {
         // 已有会话 - 在同一线程内继续，后端保留 last_draft/messages 上下文
-        await continueTask(threadId, query, user?.id);
+        await continueTask(threadId, query, user?.id, selectedMode);
       } else {
-        // 全新会话
-        const { thread_id } = await startTask(query, user?.id);
+        // 全新会话 - ✅ 传递 selectedMode
+        const { thread_id } = await startTask(query, user?.id, selectedMode);
         threadId = thread_id;
         setActiveThreadId(threadId);
       }
-      connectStream(threadId);
+      connectStream(threadId, currentRound, currentQuestion);
     } catch (err) {
       setMessages(prev => {
         const copy = [...prev];
@@ -174,11 +252,11 @@ function App() {
     }
   };
 
-  const connectStream = (threadId) => {
+  const connectStream = (threadId, currentRound, currentQuestion) => {
     const eventSource = new EventSource(`${API_BASE}/research/${threadId}/stream`);
-    // Store eventSource in a ref if I wanted to stop it, or just use a state/callback.
-    // For now, let's keep it simple. But to implement stop, we need a ref.
-    window.currentEventSource = eventSource;
+    eventSourceRef.current = eventSource;
+    
+    // ✅ 现在 currentRound 和 currentQuestion 由外部函数传入，避免时序问题
     
     eventSource.onmessage = (event) => {
       try {
@@ -194,6 +272,7 @@ function App() {
           console.log('Plan length:', data.plan ? data.plan.length : 'undefined');
           
           eventSource.close();
+          eventSourceRef.current = null;
           setPendingPlan(data.plan || []);
           setIsApprovalOpen(true);
           addLog("Paused for plan approval.");
@@ -207,13 +286,37 @@ function App() {
 
         // Search Results
         if (data.search_results) {
+             setSources(prev => {
+                // 为每个资源添加轮次、问题标记和累积索引
+                const enrichedResults = data.search_results.map((src, idx) => ({
+                    ...src,
+                    _round: currentRound,
+                    _question: currentQuestion,
+                    _sourceIndex: prev.length + idx + 1  // 累积索引：根据现有sources数量计算
+                }));
+                
+                // 合并到sources中
+                return [...prev, ...enrichedResults];
+             });
+             
              setMessages(prev => {
                 const last = prev[prev.length - 1];
+                
                 if (last && last.role === 'assistant') {
-                    return [...prev.slice(0, -1), { ...last, searchResults: data.search_results }];
+                    const updatedMsg = { 
+                        ...last, 
+                  searchResults: data.search_results,
+                        round: currentRound,
+                        roundQuestion: currentQuestion
+                    };
+                    return [...prev.slice(0, -1), updatedMsg];
                 }
-                // If it arrives before any content? Should ideally exist or we create one.
-                return [...prev, { role: 'assistant', searchResults: data.search_results }];
+                return [...prev, { 
+                    role: 'assistant',
+                searchResults: data.search_results,
+                    round: currentRound,
+                    roundQuestion: currentQuestion
+                }];
              });
         }
 
@@ -245,27 +348,41 @@ function App() {
         // Full Content Replace (Legacy/Draft)
         if (data.draft) {
              setMessages(prev => {
-                // Find if we already have an assistant "draft" message
                 const last = prev[prev.length - 1];
                 if (last && last.role === 'assistant') {
-                    // Update existing
                     const next = [...prev];
                     next[next.length - 1] = { ...last, content: data.draft };
                     return next;
                 } else {
-                    // Add new
                     return [...prev, { role: 'assistant', content: data.draft }];
                 }
              });
+             // draft 到达即代表写作完成，重置 loading
+             setIsLoading(false);
         } else if (data.response) {
-            // Chat response
-            setMessages(prev => [...prev, { role: 'assistant', content: data.response }]);
+            // Chat response: 填充占位符而非追加新消息
+          const parsed = extractThinking(data.response);
+            setMessages(prev => {
+                const last = prev[prev.length - 1];
+                if (last && last.role === 'assistant') {
+                    const next = [...prev];
+              next[next.length - 1] = {
+                ...last,
+                content: parsed.cleaned,
+                thought: parsed.thinking || last.thought,
+              };
+                    return next;
+                }
+            return [...prev, { role: 'assistant', content: parsed.cleaned, thought: parsed.thinking }];
+            });
+            setIsLoading(false);
         }
 
-        // Citations
-        if (data.citations) {
-          setSources(data.citations);
-        }
+        // Citations - 不覆盖，因为 search_results 已经包含了元数据
+        // 如果需要同步元数据，应该在后端处理
+        // if (data.citations) {
+        //   setSources(data.citations);
+        // }
 
         // Completed
         if (data.node === 'workflow_completed') {
@@ -288,9 +405,9 @@ function App() {
   };
 
   const handleStop = async () => {
-    if (window.currentEventSource) {
-        window.currentEventSource.close();
-        window.currentEventSource = null;
+    if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
     }
 
     if (activeThreadId) {
@@ -304,14 +421,29 @@ function App() {
     }
     setIsLoading(false);
     addLog("Task stopped Locally.");
+    // 将空占位符替换为停止提示
+    setMessages(prev => {
+      const last = prev[prev.length - 1];
+      if (last && last.role === 'assistant' && !last.content) {
+        const next = [...prev];
+        next[next.length - 1] = { ...last, content: '⏹ 已停止。' };
+        return next;
+      }
+      return prev;
+    });
   };
 
   const handleApprove = async () => {
     setIsApprovalOpen(false);
+    setPendingPlan([]);
+    localStorage.removeItem('di_pending_plan');
     addLog("Plan approved. Resuming...");
     try {
       await approvePlan(activeThreadId, pendingPlan);
-      connectStream(activeThreadId);
+      const userMessageCount = messages.filter(m => m.role === 'user').length;
+      const currentRound = userMessageCount;
+      const currentQuestion = messages.findLast(m => m.role === 'user')?.content || '';
+      connectStream(activeThreadId, currentRound, currentQuestion);
     } catch (err) {
       console.error(err);
       addLog("Approval failed.");
@@ -321,13 +453,13 @@ function App() {
 
   const handleReject = async () => {
     setIsApprovalOpen(false);
+    setPendingPlan([]);
+    localStorage.removeItem('di_pending_plan');
     setIsLoading(false);
     addLog("Plan rejected. Task cancelled.");
-    // 尝试通知后端取消
     if (activeThreadId) {
       try { await stopTask(activeThreadId); } catch (_) {}
     }
-    // 移除最后一条 assistant 的「正在研究」占位消息
     setMessages(prev => {
       const last = prev[prev.length - 1];
       if (last && last.role === 'assistant' && !last.content) {
@@ -355,7 +487,6 @@ function App() {
 
   const handleSelectHistory = (historyItem) => {
     setShowHistory(false);
-    // Restore the session
     if (historyItem.messages && historyItem.messages.length > 0) {
       setMessages(historyItem.messages);
     }
@@ -363,6 +494,18 @@ function App() {
       setActiveThreadId(historyItem.thread_id);
       localStorage.setItem('di_thread_id', historyItem.thread_id);
     }
+    // 从消息中恢复 sources
+    const allSources = [];
+    const seenUrls = new Set();
+    (historyItem.messages || []).forEach(msg => {
+      (msg.searchResults || []).forEach((src, idx) => {
+        if (src.url && !seenUrls.has(src.url)) {
+          seenUrls.add(src.url);
+          allSources.push({ ...src, _sourceIndex: allSources.length + 1 });
+        }
+      });
+    });
+    setSources(allSources);
   };
 
   // Get current report content
@@ -449,6 +592,34 @@ function App() {
                                 <p className="text-lg text-gray-400 max-w-lg mx-auto">
                                     DeepInsight aggregates information from real-time web agents to generate comprehensive reports.
                                 </p>
+                             </div>
+
+                             {/* ✅ 新增：模式选择器 */}
+                             <div className="space-y-3 w-full">
+                                <p className="text-xs uppercase tracking-wider text-gray-500 font-semibold">选择研究模式</p>
+                                <div className="grid grid-cols-2 gap-3 max-w-lg mx-auto">
+                                  {[
+                                    { id: 'research', icon: '📊', label: '深度研究报告', desc: '完整分析' },
+                                    { id: 'chat', icon: '💬', label: '轻量随聊', desc: '快速回答' },
+                                    { id: 'comparison', icon: '📝', label: '快速对比', desc: '对比分析' },
+                                    { id: 'follow_up', icon: '🔍', label: '追问前文', desc: '继续讨论' },
+                                  ].map((mode) => (
+                                    <button
+                                      key={mode.id}
+                                      onClick={() => setSelectedMode(mode.id)}
+                                      disabled={mode.id === 'follow_up' && !activeThreadId}
+                                      className={`py-3 px-4 rounded-lg text-sm font-medium transition-all flex flex-col items-center gap-1.5 group ${
+                                        selectedMode === mode.id
+                                          ? 'bg-gradient-to-br from-cyan-500/40 to-blue-500/30 border border-cyan-400 text-cyan-200'
+                                          : 'bg-white/5 border border-gray-700 text-gray-300 hover:border-gray-600 hover:bg-white/8'
+                                      } ${mode.id === 'follow_up' && !activeThreadId ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                    >
+                                      <span className="text-lg">{mode.icon}</span>
+                                      <span>{mode.label}</span>
+                                      <span className="text-[10px] text-gray-500 group-hover:text-gray-400">{mode.desc}</span>
+                                    </button>
+                                  ))}
+                                </div>
                              </div>
 
                              <div className="relative group">
@@ -720,6 +891,31 @@ function App() {
 
                                  {/* Persistent Input Box with Stop Button */}
                                  <div className="p-4 border-t border-white/10 bg-[#111111] space-y-3">
+                                    {/* Mode Switcher */}
+                                    {!isLoading && (
+                                      <div className="max-w-3xl mx-auto flex gap-2 flex-wrap">
+                                        {[
+                                          { id: 'research', icon: '📊', label: '深度研究' },
+                                          { id: 'chat', icon: '💬', label: '随聊' },
+                                          { id: 'comparison', icon: '📝', label: '对比' },
+                                          { id: 'follow_up', icon: '🔍', label: '追问' },
+                                        ].map(mode => (
+                                          <button
+                                            key={mode.id}
+                                            onClick={() => setSelectedMode(mode.id)}
+                                            disabled={mode.id === 'follow_up' && !activeThreadId}
+                                            className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium transition-all ${
+                                              selectedMode === mode.id
+                                                ? 'bg-cyan-500/20 border border-cyan-400/50 text-cyan-300'
+                                                : 'bg-white/5 border border-white/10 text-gray-400 hover:text-white hover:border-white/20'
+                                            } ${mode.id === 'follow_up' && !activeThreadId ? 'opacity-40 cursor-not-allowed' : ''}`}
+                                          >
+                                            <span>{mode.icon}</span>
+                                            <span>{mode.label}</span>
+                                          </button>
+                                        ))}
+                                      </div>
+                                    )}
                                     {/* Status Indicator */}
                                     {isLoading && (
                                         <div className="flex items-center gap-2 px-4 py-2 bg-cyan-500/10 border border-cyan-500/30 rounded-lg">

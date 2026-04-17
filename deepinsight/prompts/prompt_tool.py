@@ -39,9 +39,9 @@ def select_style_preset(params: dict) -> str:
             return "tech_tutorial"
         elif field == "finance":
             return "finance_professional"
-    else:
-        return "lifestyle_guide"
-    
+        else:
+            return "lifestyle_guide"
+
     if category == "report":
         if field == "tech" :
             if depth == "deep" or audience == "professional":
@@ -85,11 +85,9 @@ def get_style_config(style_key: str) -> dict:
         return STYLE_CONFIG[style_key]
     
     logger.warning(f"未知的风格预设标签: {style_key}，使用默认配置")
-    return STYLE_CONFIG.get("professional", {
-        STYLE_CONFIG.get("tech_deep", {
+    return STYLE_CONFIG.get("tech_deep", {
         "persona": "你是一位专业的分析师，语言简洁准确。",
         "structure": "使用标准的报告格式：摘要 → 分析 → 结论",
         "standards": "引用权威数据，保持客观中立",
         "format": "Markdown 格式，使用合适的标题层级"
-        })
     })

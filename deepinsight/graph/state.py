@@ -5,11 +5,11 @@ class SubTask(TypedDict):
     '''
     任务步骤
     '''
-    id:int
-    type:str    # research, analysis, writing,summarized
-    description:str
-    status:str  # pending, completed
-    result:str
+    id: str
+    type: str    # research, analysis, writing,summarized
+    description: str
+    status: str  # pending, completed
+    result: str
 
 class DraftState(TypedDict):
     """
@@ -34,7 +34,12 @@ class ResearchState(TypedDict):
     depth: str # 任务深度
     audience: str # 目标受众
     style: str # 写作风格
+    style_config: Dict[str, Any]  # 写作风格配置
     thread_id: str  # 任务线程ID
+
+    # 场景模式
+    mode: str  # 场景模式：research | chat | comparison | follow_up
+    mode_config: Dict[str, Any]  # 该模式的完整配置
 
     # 研究流程相关
     plan: List[SubTask] # 任务步骤列表
